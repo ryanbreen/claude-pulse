@@ -159,6 +159,47 @@ export function getRecentHistory(hours: number = 24): HistoryEntry[] {
   }
 }
 
+export interface PeakActivity {
+  count: number;
+  hour: number;
+  minute: number;
+  label: string;
+}
+
+export function getPeakConcurrent(history: HistoryEntry[]): PeakActivity {
+  // Count unique sessions per 20-min bucket to find peak concurrency
+  const bucketSessions = new Map<number, Set<string>>();
+
+  for (const entry of history) {
+    if (!entry.sessionId) continue;
+    const d = new Date(entry.timestamp);
+    const bucket = d.getHours() * 3 + Math.floor(d.getMinutes() / 20);
+    let set = bucketSessions.get(bucket);
+    if (!set) {
+      set = new Set();
+      bucketSessions.set(bucket, set);
+    }
+    set.add(entry.sessionId);
+  }
+
+  let peakBucket = 0;
+  let peakCount = 0;
+  for (const [bucket, sessions] of bucketSessions) {
+    if (sessions.size > peakCount) {
+      peakCount = sessions.size;
+      peakBucket = bucket;
+    }
+  }
+
+  const hour = Math.floor(peakBucket / 3);
+  const minute = (peakBucket % 3) * 20;
+  const period = hour >= 12 ? "pm" : "am";
+  const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+  const label = `${h12}:${String(minute).padStart(2, "0")}${period}`;
+
+  return { count: peakCount, hour, minute, label };
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;

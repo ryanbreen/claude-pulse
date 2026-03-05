@@ -3,6 +3,7 @@ import { Box, Text, useApp, useInput, useStdin } from "ink";
 import {
   getActiveSessions,
   getRecentHistory,
+  getPeakConcurrent,
   formatDuration,
   shortenPath,
   type ClaudeSession,
@@ -188,6 +189,7 @@ export default function App() {
   const uniqueSessions24h = new Set(
     recentHistory.map((h) => h.sessionId).filter(Boolean)
   );
+  const peak24h = getPeakConcurrent(recentHistory);
 
   const countData = timeline.map((h) => h.count);
   const cpuData = timeline.map((h) => h.activeCpu);
@@ -290,6 +292,13 @@ export default function App() {
           <Text bold>
             {" "}
             {uniqueProjects.size}
+          </Text>
+        </Box>
+        <Box flexDirection="column" width={16}>
+          <Text dimColor>24H PEAK</Text>
+          <Text bold color="magenta">
+            {" "}
+            {peak24h.count} @ {peak24h.label}
           </Text>
         </Box>
       </Box>

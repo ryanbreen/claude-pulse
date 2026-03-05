@@ -1,6 +1,7 @@
 import {
   getActiveSessions,
   getRecentHistory,
+  getPeakConcurrent,
   formatDuration,
   shortenPath,
 } from "./scanner.js";
@@ -56,8 +57,9 @@ export function renderSnapshot(): string {
   lines.push(
     `  ACTIVE: ${active.length}   IDLE: ${idle.length}   TOTAL: ${sessions.length}   CPU: ${totalCpu.toFixed(1)}%`
   );
+  const peak = getPeakConcurrent(history);
   lines.push(
-    `  MEMORY: ${totalMem} GB   LONGEST: ${formatDuration(longest)}   24H: ${uniqueSessions.size} sessions / ${uniqueProjects.size} projects`
+    `  MEMORY: ${totalMem} GB   LONGEST: ${formatDuration(longest)}   24H: ${uniqueSessions.size} sessions / ${uniqueProjects.size} projects   PEAK: ${peak.count} @ ${peak.label}`
   );
   lines.push(sep);
   lines.push(`  ${heatmap}`);
