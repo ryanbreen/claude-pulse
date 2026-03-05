@@ -56,25 +56,38 @@ function Gauge({
 }
 
 function HourlyHeatmap({ history }: { history: HistoryEntry[] }) {
-  // Build a 24-hour heatmap of conversation starts
-  const buckets = new Array(24).fill(0);
+  // 72 buckets = 20-minute intervals across 24 hours
+  const BUCKETS = 72;
+  const buckets = new Array(BUCKETS).fill(0);
+  const now = new Date();
+  const currentBucket = now.getHours() * 3 + Math.floor(now.getMinutes() / 20);
+
   for (const entry of history) {
-    const hour = new Date(entry.timestamp).getHours();
-    buckets[hour]++;
+    const d = new Date(entry.timestamp);
+    const bucket = d.getHours() * 3 + Math.floor(d.getMinutes() / 20);
+    buckets[bucket]++;
   }
   const max = Math.max(...buckets, 1);
-  const currentHour = new Date().getHours();
+
+  // Build hour labels aligned to the 72-char width (every 3 chars = 1 hour)
+  const labels = new Array(BUCKETS).fill(" ");
+  for (let h = 0; h < 24; h += 3) {
+    const pos = h * 3;
+    const lbl = String(h).padStart(2);
+    labels[pos] = lbl[0];
+    labels[pos + 1] = lbl[1];
+  }
 
   return (
     <Box flexDirection="column">
-      <Text dimColor>24H ACTIVITY HEATMAP</Text>
+      <Text dimColor>24H ACTIVITY (20-min buckets)</Text>
       <Box>
-        {buckets.map((count, hour) => {
+        {buckets.map((count, i) => {
           const level = Math.min(Math.floor((count / max) * 4), 4);
-          const isCurrent = hour === currentHour;
+          const isCurrent = i === currentBucket;
           return (
             <Text
-              key={`heat-${hour}`}
+              key={`heat-${i}`}
               color={isCurrent ? "cyan" : count === 0 ? "gray" : "yellow"}
               bold={isCurrent}
             >
@@ -84,9 +97,7 @@ function HourlyHeatmap({ history }: { history: HistoryEntry[] }) {
         })}
       </Box>
       <Box>
-        <Text dimColor>
-          {"0     4     8    12    16    20  23"}
-        </Text>
+        <Text dimColor>{labels.join("")}</Text>
       </Box>
     </Box>
   );

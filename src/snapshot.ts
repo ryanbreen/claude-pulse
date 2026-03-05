@@ -27,16 +27,25 @@ export function renderSnapshot(): string {
     history.map((h) => h.project).filter(Boolean)
   );
 
-  // Heatmap
-  const buckets = new Array(24).fill(0);
+  // Heatmap - 72 buckets (20-min intervals)
+  const BUCKETS = 72;
+  const buckets = new Array(BUCKETS).fill(0);
   for (const entry of history) {
-    const hour = new Date(entry.timestamp).getHours();
-    buckets[hour]++;
+    const d = new Date(entry.timestamp);
+    const bucket = d.getHours() * 3 + Math.floor(d.getMinutes() / 20);
+    buckets[bucket]++;
   }
   const heatMax = Math.max(...buckets, 1);
   const heatmap = buckets
     .map((c) => HEAT[Math.min(Math.floor((c / heatMax) * 4), 4)])
     .join("");
+  const labels = new Array(BUCKETS).fill(" ");
+  for (let h = 0; h < 24; h += 3) {
+    const pos = h * 3;
+    const lbl = String(h).padStart(2);
+    labels[pos] = lbl[0];
+    labels[pos + 1] = lbl[1];
+  }
 
   const sep = "─".repeat(72);
   const lines: string[] = [];
@@ -51,8 +60,8 @@ export function renderSnapshot(): string {
     `  MEMORY: ${totalMem} GB   LONGEST: ${formatDuration(longest)}   24H: ${uniqueSessions.size} sessions / ${uniqueProjects.size} projects`
   );
   lines.push(sep);
-  lines.push(`  24H HEATMAP: ${heatmap}`);
-  lines.push(`               0     4     8    12    16    20  23`);
+  lines.push(`  ${heatmap}`);
+  lines.push(`  ${labels.join("")}`);
   lines.push(sep);
 
   if (sessions.length > 0) {
