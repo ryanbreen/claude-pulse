@@ -1,0 +1,32 @@
+{
+  "name": "claude-pulse",
+  "version": "1.0.0",
+  "description": "TUI dashboard for monitoring active Claude Code sessions",
+  "type": "module",
+  "bin": {
+    "claude-pulse": "./bin/claude-pulse.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.tsx",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["claude", "tui", "monitoring", "ink"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cli-spinners": "^3.4.0",
+    "ink": "^6.8.0",
+    "ink-big-text": "^2.0.0",
+    "ink-gradient": "^4.0.0",
+    "ink-spinner": "^5.0.0",
+    "ink-table": "^3.1.0",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "@types/react": "^19.2.14",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
