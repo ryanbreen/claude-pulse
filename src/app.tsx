@@ -14,18 +14,15 @@ const SPARK = "▁▂▃▄▅▆▇█";
 const HEAT = ["·", "░", "▒", "▓", "█"];
 
 function spark(data: number[], width: number): string {
-  if (data.length === 0) return "";
+  if (data.length === 0) return SPARK[0].repeat(width);
   const max = Math.max(...data, 1);
-  // Resample data to fit width
-  if (data.length > width) {
-    const step = data.length / width;
-    const resampled: number[] = [];
-    for (let i = 0; i < width; i++) {
-      resampled.push(data[Math.floor(i * step)]);
-    }
-    data = resampled;
+  // Always resample to exactly fill the target width
+  const resampled: number[] = [];
+  const step = data.length / width;
+  for (let i = 0; i < width; i++) {
+    resampled.push(data[Math.min(Math.floor(i * step), data.length - 1)]);
   }
-  return data
+  return resampled
     .map((v) => SPARK[Math.min(Math.floor((v / max) * 7), 7)])
     .join("");
 }
