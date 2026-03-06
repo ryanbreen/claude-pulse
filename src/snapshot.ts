@@ -12,7 +12,7 @@ const HEAT = ["·", "░", "▒", "▓", "█"];
 export function renderSnapshot(): string {
   const W = process.stdout.columns || 120;
   const sessions = getActiveSessions();
-  const history = getRecentHistory(24);
+  const history = getRecentHistory(48);
   const active = sessions.filter(
     (s) =>
       s.turnState === "working" ||
@@ -31,26 +31,41 @@ export function renderSnapshot(): string {
     (m, s) => (s.elapsedSeconds > m ? s.elapsedSeconds : m),
     0
   );
+  const cutoff24h = Date.now() - 24 * 3600 * 1000;
+  const history24h = history.filter((h) => h.timestamp >= cutoff24h);
   const uniqueSessions = new Set(
-    history.map((h) => h.sessionId).filter(Boolean)
+    history24h.map((h) => h.sessionId).filter(Boolean)
   );
   const uniqueProjects = new Set(
-    history.map((h) => h.project).filter(Boolean)
+    history24h.map((h) => h.project).filter(Boolean)
   );
 
-  // Heatmap - scale to terminal width
-  const heatWidth = W - 2;
+  // Heatmap - two rows: yesterday and today
+  const labelWidth = 6;
+  const heatWidth = W - 2 - labelWidth;
   const minutesPerBucket = (24 * 60) / heatWidth;
-  const buckets = new Array(heatWidth).fill(0);
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+  const todayBuckets = new Array(heatWidth).fill(0);
+  const yesterdayBuckets = new Array(heatWidth).fill(0);
   for (const entry of history) {
     const d = new Date(entry.timestamp);
     const bucket = Math.floor(
       (d.getHours() * 60 + d.getMinutes()) / minutesPerBucket
     );
-    if (bucket < heatWidth) buckets[bucket]++;
+    if (bucket >= heatWidth) continue;
+    if (entry.timestamp >= todayStart) {
+      todayBuckets[bucket]++;
+    } else if (entry.timestamp >= yesterdayStart) {
+      yesterdayBuckets[bucket]++;
+    }
   }
-  const heatMax = Math.max(...buckets, 1);
-  const heatmap = buckets
+  const heatMax = Math.max(...todayBuckets, ...yesterdayBuckets, 1);
+  const yesterdayHeatmap = yesterdayBuckets
+    .map((c) => HEAT[Math.min(Math.floor((c / heatMax) * 4), 4)])
+    .join("");
+  const todayHeatmap = todayBuckets
     .map((c) => HEAT[Math.min(Math.floor((c / heatMax) * 4), 4)])
     .join("");
   const labels = new Array(heatWidth).fill(" ");
@@ -66,7 +81,7 @@ export function renderSnapshot(): string {
   const sep = "─".repeat(W);
   const lines: string[] = [];
   const time = new Date().toLocaleTimeString();
-  const peak = getPeakConcurrent(history);
+  const peak = getPeakConcurrent(history24h);
 
   // Fixed columns: dot(2) + PID(7) + TTY(7) + UPTIME(10) + CPU(7) + MEM(7) + MODE(9) = 49
   const dirWidth = Math.max(W - 51, 20);
@@ -82,8 +97,9 @@ export function renderSnapshot(): string {
     `  LONGEST: ${formatDuration(longest)}   24H: ${uniqueSessions.size} sessions / ${uniqueProjects.size} projects   PEAK: ${peak.count} @ ${peak.label}`
   );
   lines.push(sep);
-  lines.push(`  ${heatmap}`);
-  lines.push(`  ${labels.join("")}`);
+  lines.push(`  ${"YEST ".padEnd(labelWidth)}${yesterdayHeatmap}`);
+  lines.push(`  ${"TODAY".padEnd(labelWidth)}${todayHeatmap}`);
+  lines.push(`  ${" ".repeat(labelWidth)}${labels.join("")}`);
   lines.push(sep);
 
   if (sessions.length > 0) {

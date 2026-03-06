@@ -81,28 +81,41 @@ function HourlyHeatmap({
   history: HistoryEntry[];
   width: number;
 }) {
-  const bucketCount = Math.max(width, 24);
-  const minutesPerBucket = (24 * 60) / bucketCount;
-  const buckets = new Array(bucketCount).fill(0);
+  const labelWidth = 6; // "TODAY " or "YEST "
+  const barWidth = Math.max(width - labelWidth, 24);
+  const minutesPerBucket = (24 * 60) / barWidth;
+
   const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+
+  const todayBuckets = new Array(barWidth).fill(0);
+  const yesterdayBuckets = new Array(barWidth).fill(0);
+
+  for (const entry of history) {
+    const ts = entry.timestamp;
+    const d = new Date(ts);
+    const bucket = Math.floor(
+      (d.getHours() * 60 + d.getMinutes()) / minutesPerBucket
+    );
+    if (bucket >= barWidth) continue;
+    if (ts >= todayStart) {
+      todayBuckets[bucket]++;
+    } else if (ts >= yesterdayStart) {
+      yesterdayBuckets[bucket]++;
+    }
+  }
+
+  // Use shared max so the two rows are comparable
+  const max = Math.max(...todayBuckets, ...yesterdayBuckets, 1);
   const currentBucket = Math.floor(
     (now.getHours() * 60 + now.getMinutes()) / minutesPerBucket
   );
 
-  for (const entry of history) {
-    const d = new Date(entry.timestamp);
-    const bucket = Math.floor(
-      (d.getHours() * 60 + d.getMinutes()) / minutesPerBucket
-    );
-    if (bucket < bucketCount) buckets[bucket]++;
-  }
-  const max = Math.max(...buckets, 1);
-
-  const labels = new Array(bucketCount).fill(" ");
-  const hoursToLabel = [0, 3, 6, 9, 12, 15, 18, 21];
-  for (const h of hoursToLabel) {
+  const labels = new Array(barWidth).fill(" ");
+  for (const h of [0, 3, 6, 9, 12, 15, 18, 21]) {
     const pos = Math.floor((h * 60) / minutesPerBucket);
-    if (pos + 1 < bucketCount) {
+    if (pos + 1 < barWidth) {
       const lbl = String(h).padStart(2);
       labels[pos] = lbl[0];
       labels[pos + 1] = lbl[1];
@@ -112,16 +125,31 @@ function HourlyHeatmap({
   return (
     <Box flexDirection="column">
       <Text dimColor>
-        24H ACTIVITY ({Math.round(minutesPerBucket)}-min buckets)
+        ACTIVITY ({Math.round(minutesPerBucket)}-min buckets)
       </Text>
       <Box>
-        {buckets.map((count, i) => {
+        <Text dimColor>{"YEST ".padEnd(labelWidth)}</Text>
+        {yesterdayBuckets.map((count, i) => {
+          const level = Math.min(Math.floor((count / max) * 4), 4);
+          return (
+            <Text
+              key={`yest-${i}`}
+              color={count === 0 ? "gray" : "blue"}
+            >
+              {HEAT[level]}
+            </Text>
+          );
+        })}
+      </Box>
+      <Box>
+        <Text dimColor>{"TODAY ".padEnd(labelWidth)}</Text>
+        {todayBuckets.map((count, i) => {
           const level = Math.min(Math.floor((count / max) * 4), 4);
           const isCurrent = i === currentBucket;
           return (
             <Text
-              key={`heat-${i}`}
-              color={isCurrent ? "cyan" : count === 0 ? "gray" : "yellow"}
+              key={`today-${i}`}
+              color={isCurrent ? "cyan" : count === 0 ? "gray" : "green"}
               bold={isCurrent}
             >
               {HEAT[level]}
@@ -130,7 +158,7 @@ function HourlyHeatmap({
         })}
       </Box>
       <Box>
-        <Text dimColor>{labels.join("")}</Text>
+        <Text dimColor>{" ".repeat(labelWidth)}{labels.join("")}</Text>
       </Box>
     </Box>
   );
@@ -387,7 +415,7 @@ export default function App() {
   const [sessions, setSessions] = useState<ClaudeSession[]>(getActiveSessions);
   const [timeline, setTimeline] = useState<HistoryPoint[]>([]);
   const [recentHistory, setRecentHistory] = useState<HistoryEntry[]>(() =>
-    getRecentHistory(24)
+    getRecentHistory(48)
   );
   const [tick, setTick] = useState(0);
 
@@ -475,7 +503,7 @@ export default function App() {
 
       setTick((t) => {
         if (t % 10 === 0) {
-          setRecentHistory(getRecentHistory(24));
+          setRecentHistory(getRecentHistory(48));
           reportSnapshot(currentSessions);
         }
         return t + 1;
@@ -483,7 +511,7 @@ export default function App() {
     };
 
     refresh();
-    setRecentHistory(getRecentHistory(24));
+    setRecentHistory(getRecentHistory(48));
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, []);
@@ -512,13 +540,15 @@ export default function App() {
     0
   );
 
+  const cutoff24h = Date.now() - 24 * 3600 * 1000;
+  const history24h = recentHistory.filter((h) => h.timestamp >= cutoff24h);
   const uniqueProjects = new Set(
-    recentHistory.map((h) => h.project).filter(Boolean)
+    history24h.map((h) => h.project).filter(Boolean)
   );
   const uniqueSessions24h = new Set(
-    recentHistory.map((h) => h.sessionId).filter(Boolean)
+    history24h.map((h) => h.sessionId).filter(Boolean)
   );
-  const peak24h = getPeakConcurrent(recentHistory);
+  const peak24h = getPeakConcurrent(history24h);
 
   const countData = timeline.map((h) => h.count);
   const cpuData = timeline.map((h) => h.activeCpu);
