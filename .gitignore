@@ -2,3 +2,4 @@ node_modules/
 dist/
 worker/.dev.vars
 .env
+bin/claude-badge
