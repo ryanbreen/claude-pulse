@@ -1,7 +1,22 @@
 import { execSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
+import {
+  readFileSync,
+  existsSync,
+  readdirSync,
+  statSync,
+  openSync,
+  readSync,
+  closeSync,
+  fstatSync,
+} from "fs";
 import { homedir } from "os";
 import { join } from "path";
+
+// CPU threshold kept as a secondary signal for display (dot color, sparklines).
+// Primary "working" detection uses JSONL turn state, not CPU.
+export const ACTIVE_CPU_THRESHOLD = 3.0;
+
+export type TurnState = "working" | "idle" | "unknown";
 
 export interface ClaudeSession {
   pid: number;
@@ -16,6 +31,7 @@ export interface ClaudeSession {
   flags: string[];
   sessionId?: string;
   isSubagent: boolean;
+  turnState: TurnState;
 }
 
 export interface HistoryEntry {
@@ -40,6 +56,133 @@ function parseElapsed(elapsed: string): number {
     return days * 86400 + parts[0] * 60 + parts[1];
   }
   return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+/**
+ * Determine if a session is mid-turn by reading the tail of its JSONL transcript.
+ *
+ * State machine:
+ *   - Last meaningful entry is `system` with `subtype: "turn_duration"` → idle
+ *   - A `user` entry with text content (not tool_result) after the last turn_duration → working
+ *   - Otherwise → unknown
+ *
+ * We read the last ~8KB of the file to find the most recent turn boundary.
+ */
+function detectTurnState(cwd: string, sessionId?: string): TurnState {
+  const home = homedir();
+  const projectsDir = join(home, ".claude", "projects");
+
+  // Convert CWD to the project directory name Claude uses:
+  // /Users/wrb/fun/code/claude-pulse → -Users-wrb-fun-code-claude-pulse
+  const projectDirName = cwd.replace(/\//g, "-");
+  const projectPath = join(projectsDir, projectDirName);
+
+  if (!existsSync(projectPath)) return "unknown";
+
+  // Find the right JSONL — if we have a session ID, use it directly.
+  // Otherwise, use the most recently modified JSONL in the project dir.
+  let jsonlPath: string | null = null;
+
+  if (sessionId) {
+    const candidate = join(projectPath, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) jsonlPath = candidate;
+  }
+
+  if (!jsonlPath) {
+    try {
+      const entries = readdirSync(projectPath)
+        .filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"))
+        .map((f) => ({
+          name: f,
+          mtime: statSync(join(projectPath, f)).mtimeMs,
+        }))
+        .sort((a, b) => b.mtime - a.mtime);
+      if (entries.length > 0) {
+        jsonlPath = join(projectPath, entries[0].name);
+      }
+    } catch {
+      return "unknown";
+    }
+  }
+
+  if (!jsonlPath) return "unknown";
+
+  try {
+    // Read last ~16KB for enough context to find the turn boundary
+    const fd = openSync(jsonlPath, "r");
+    const stat = fstatSync(fd);
+    const readSize = Math.min(stat.size, 16384);
+    const buffer = Buffer.alloc(readSize);
+    readSync(fd, buffer, 0, readSize, Math.max(0, stat.size - readSize));
+    closeSync(fd);
+
+    const tail = buffer.toString("utf-8");
+    const lines = tail.split("\n").filter((l) => l.trim());
+
+    // Scan for the decisive signals:
+    // - system/turn_duration or system/stop_hook_summary = turn complete (idle)
+    // - user with text content (not tool_result) = human sent message (working)
+    // - assistant with text as final entry + stale = turn complete but system entries missing
+    let lastTurnEndTs = 0;
+    let lastHumanMessageTs = 0;
+    let lastAssistantTextTs = 0;
+
+    for (const line of lines) {
+      try {
+        const d = JSON.parse(line);
+        const ts = d.timestamp ? new Date(d.timestamp).getTime() : 0;
+
+        if (d.type === "system") {
+          const sub = d.subtype;
+          if (sub === "turn_duration" || sub === "stop_hook_summary") {
+            if (ts > lastTurnEndTs) lastTurnEndTs = ts;
+          }
+        }
+
+        if (d.type === "assistant") {
+          const content = d.message?.content;
+          if (Array.isArray(content)) {
+            const hasText = content.some((c: any) => c.type === "text");
+            if (hasText && ts > lastAssistantTextTs) lastAssistantTextTs = ts;
+          }
+        }
+
+        if (d.type === "user") {
+          const content = d.message?.content;
+          // Distinguish human text from automatic tool_result
+          if (typeof content === "string" && content.length > 0) {
+            if (ts > lastHumanMessageTs) lastHumanMessageTs = ts;
+          } else if (Array.isArray(content)) {
+            const hasText = content.some(
+              (c: any) => c.type === "text" && c.text?.length > 0
+            );
+            if (hasText) {
+              if (ts > lastHumanMessageTs) lastHumanMessageTs = ts;
+            }
+          }
+        }
+      } catch {
+        // skip malformed lines (e.g., partial line at start of buffer)
+      }
+    }
+
+    if (lastHumanMessageTs === 0 && lastTurnEndTs === 0) return "unknown";
+    if (lastHumanMessageTs > lastTurnEndTs) {
+      // Human message is newer than last turn end — but check for stale turns.
+      // If Claude's last text response is after the human message and >30s old,
+      // the turn is done but system entries were never written (crash/Ctrl-C).
+      if (
+        lastAssistantTextTs > lastHumanMessageTs &&
+        Date.now() - lastAssistantTextTs > 30_000
+      ) {
+        return "idle";
+      }
+      return "working";
+    }
+    return "idle";
+  } catch {
+    return "unknown";
+  }
 }
 
 function batchGetCwd(pids: number[]): Map<number, string> {
@@ -140,10 +283,11 @@ export function getActiveSessions(): ClaudeSession[] {
         cpuPercent: parseFloat(match[5]),
         rssMB: Math.round(parseInt(match[6]) / 1024),
         command,
-        cwd: "unknown",
+        cwd: "unknown", // filled in below, then turnState resolved
         flags,
         sessionId: sidMatch ? sidMatch[1] : undefined,
         isSubagent,
+        turnState: "unknown" as TurnState, // resolved after CWD is known
       });
     }
 
@@ -151,6 +295,13 @@ export function getActiveSessions(): ClaudeSession[] {
     const cwdMap = batchGetCwd(sessions.map((s) => s.pid));
     for (const s of sessions) {
       s.cwd = cwdMap.get(s.pid) ?? "unknown";
+    }
+
+    // Resolve turn state from JSONL transcripts (only for interactive sessions)
+    for (const s of sessions) {
+      if (!s.isSubagent && s.cwd !== "unknown") {
+        s.turnState = detectTurnState(s.cwd, s.sessionId);
+      }
     }
 
     return sessions.sort((a, b) => b.cpuPercent - a.cpuPercent);

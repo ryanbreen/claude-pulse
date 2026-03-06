@@ -4,6 +4,7 @@ import {
   getPeakConcurrent,
   formatDuration,
   shortenPath,
+  ACTIVE_CPU_THRESHOLD,
 } from "./scanner.js";
 
 const HEAT = ["·", "░", "▒", "▓", "█"];
@@ -12,8 +13,16 @@ export function renderSnapshot(): string {
   const W = process.stdout.columns || 120;
   const sessions = getActiveSessions();
   const history = getRecentHistory(24);
-  const active = sessions.filter((s) => s.cpuPercent > 0.5);
-  const idle = sessions.filter((s) => s.cpuPercent <= 0.5);
+  const active = sessions.filter(
+    (s) =>
+      s.turnState === "working" ||
+      (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD)
+  );
+  const idle = sessions.filter(
+    (s) =>
+      s.turnState === "idle" ||
+      (s.turnState === "unknown" && s.cpuPercent <= ACTIVE_CPU_THRESHOLD)
+  );
   const totalMem = (
     sessions.reduce((s, c) => s + c.rssMB, 0) / 1024
   ).toFixed(1);
@@ -83,8 +92,14 @@ export function renderSnapshot(): string {
     );
 
     for (const s of sessions) {
-      const dot =
-        s.cpuPercent > 10 ? "⚡" : s.cpuPercent > 0.5 ? "● " : "○ ";
+      const isWorking =
+        s.turnState === "working" ||
+        (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD);
+      const dot = isWorking
+        ? s.cpuPercent > 10
+          ? "⚡"
+          : "● "
+        : "○ ";
       const line =
         `  ${dot}` +
         `${String(s.pid).padEnd(7)}` +

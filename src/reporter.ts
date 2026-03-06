@@ -1,4 +1,4 @@
-import { getActiveSessions, type ClaudeSession } from "./scanner.js";
+import { getActiveSessions, ACTIVE_CPU_THRESHOLD, type ClaudeSession } from "./scanner.js";
 
 const API_URL =
   process.env.CLAUDE_PULSE_API_URL ??
@@ -88,8 +88,16 @@ export async function reportSnapshot(sessions?: ClaudeSession[]) {
 
   const s = sessions ?? getActiveSessions();
   const interactive = s.filter((x) => !x.isSubagent);
-  const active = interactive.filter((x) => x.cpuPercent > 0.5);
-  const idle = interactive.filter((x) => x.cpuPercent <= 0.5);
+  const active = interactive.filter(
+    (x) =>
+      x.turnState === "working" ||
+      (x.turnState === "unknown" && x.cpuPercent > ACTIVE_CPU_THRESHOLD)
+  );
+  const idle = interactive.filter(
+    (x) =>
+      x.turnState === "idle" ||
+      (x.turnState === "unknown" && x.cpuPercent <= ACTIVE_CPU_THRESHOLD)
+  );
   const totalCpu = s.reduce((sum, x) => sum + x.cpuPercent, 0);
   const totalMem = s.reduce((sum, x) => sum + x.rssMB, 0);
   const longest = interactive.reduce(
