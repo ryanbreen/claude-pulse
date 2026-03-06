@@ -182,6 +182,40 @@ export default {
         );
       }
 
+      // POST /cleanup - Recalculate active_count from session data using 3% CPU threshold
+      if (path === "/cleanup" && request.method === "POST") {
+        // Get all snapshots that have session data
+        const snapshots = await env.DB.prepare(
+          `SELECT s.id, s.active_count, s.total_count,
+                  (SELECT COUNT(*) FROM sessions ss WHERE ss.snapshot_id = s.id AND ss.cpu_percent > 3.0) AS new_active,
+                  (SELECT COUNT(*) FROM sessions ss WHERE ss.snapshot_id = s.id AND ss.cpu_percent <= 3.0) AS new_idle
+           FROM snapshots s`
+        ).all();
+
+        let updated = 0;
+        const stmts = [];
+        for (const snap of snapshots.results as any[]) {
+          if (snap.active_count !== snap.new_active) {
+            stmts.push(
+              env.DB.prepare(
+                `UPDATE snapshots SET active_count = ?, idle_count = ? WHERE id = ?`
+              ).bind(snap.new_active, snap.new_idle, snap.id)
+            );
+            updated++;
+          }
+        }
+
+        // D1 batch limit is 100 statements
+        for (let i = 0; i < stmts.length; i += 100) {
+          await env.DB.batch(stmts.slice(i, i + 100));
+        }
+
+        return Response.json(
+          { ok: true, total: snapshots.results.length, updated },
+          { headers: corsHeaders }
+        );
+      }
+
       return Response.json({ error: "not found" }, { status: 404, headers: corsHeaders });
     } catch (e: any) {
       return Response.json(
