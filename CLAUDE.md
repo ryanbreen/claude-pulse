@@ -17,6 +17,14 @@ A TUI dashboard for monitoring active Claude Code sessions across the system. Bu
 - `npm run dev` - Interactive TUI
 - `npm run dev -- --snapshot` - One-shot plain text output
 
+## Cloudflare / Wrangler
+
+The Cloudflare API token for the personal account (ryan@ryanbreen.com) is in `../envrc`. Since Claude Code shells don't run direnv hooks, source it before wrangler commands:
+
+```
+source /Users/wrb/fun/code/.envrc && npx wrangler ...
+```
+
 ## Key Design Decisions
 
 - Session detection uses `ps -eo` for process list + single batched `lsof` call for cwds (fast, ~700ms for 18 sessions)
