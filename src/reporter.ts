@@ -5,6 +5,26 @@ const API_URL =
   "https://claude-pulse-api.porivo.workers.dev";
 const API_KEY = process.env.CLAUDE_PULSE_API_KEY ?? "";
 
+export interface ReportStatus {
+  enabled: boolean;
+  lastSent: number | null;
+  lastError: string | null;
+  totalSent: number;
+  totalErrors: number;
+}
+
+const status: ReportStatus = {
+  enabled: !!API_KEY,
+  lastSent: null,
+  lastError: null,
+  totalSent: 0,
+  totalErrors: 0,
+};
+
+export function getReportStatus(): ReportStatus {
+  return { ...status };
+}
+
 export async function reportSnapshot(sessions?: ClaudeSession[]) {
   if (!API_KEY) return;
 
@@ -46,8 +66,18 @@ export async function reportSnapshot(sessions?: ClaudeSession[]) {
       },
       body: JSON.stringify(payload),
     });
-    return await resp.json();
-  } catch {
-    // silently fail - don't disrupt the TUI
+    const body = await resp.json();
+    if (resp.ok) {
+      status.lastSent = Date.now();
+      status.totalSent++;
+      status.lastError = null;
+    } else {
+      status.totalErrors++;
+      status.lastError = (body as any)?.error ?? `HTTP ${resp.status}`;
+    }
+    return body;
+  } catch (e: any) {
+    status.totalErrors++;
+    status.lastError = e.message ?? "network error";
   }
 }
