@@ -1,6 +1,6 @@
 import { writeFileSync } from "fs";
 import { execSync } from "child_process";
-import type { ClaudeSession } from "./scanner.js";
+import { ACTIVE_CPU_THRESHOLD, type ClaudeSession } from "./scanner.js";
 
 const STATE_PATH = "/tmp/claude-pulse-state.json";
 
@@ -80,10 +80,17 @@ function matchSessionToWindow(
   return null;
 }
 
+function isSessionWorking(s: ClaudeSession): boolean {
+  return (
+    s.turnState === "working" ||
+    (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD)
+  );
+}
+
 export function updateCompletedSessions(sessions: ClaudeSession[]): void {
   const interactive = sessions.filter((s) => !s.isSubagent);
   const currentlyActive = new Set(
-    interactive.filter((s) => s.cpuPercent > 0.5).map((s) => s.pid)
+    interactive.filter(isSessionWorking).map((s) => s.pid)
   );
 
   // Find sessions that were active last tick but are now idle = just completed
@@ -134,7 +141,7 @@ function writeState(interactive: ClaudeSession[]): void {
   try {
     const state = {
       updated: Date.now(),
-      activeCount: interactive.filter((s) => s.cpuPercent > 0.5).length,
+      activeCount: interactive.filter(isSessionWorking).length,
       totalCount: interactive.length,
       cursor,
       completed: completedQueue,
@@ -150,5 +157,5 @@ export function getCompletedQueue(): CompletedSession[] {
 }
 
 export function getActiveCount(sessions: ClaudeSession[]): number {
-  return sessions.filter((s) => !s.isSubagent && s.cpuPercent > 0.5).length;
+  return sessions.filter((s) => !s.isSubagent && isSessionWorking(s)).length;
 }

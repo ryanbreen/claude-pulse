@@ -6,8 +6,10 @@ import {
   getPeakConcurrent,
   formatDuration,
   shortenPath,
+  ACTIVE_CPU_THRESHOLD,
   type ClaudeSession,
   type HistoryEntry,
+  type TurnState,
 } from "./scanner.js";
 import {
   reportSnapshot,
@@ -446,13 +448,18 @@ export default function App() {
         const interactiveSessions = currentSessions.filter(
           (c) => !c.isSubagent
         );
+        const workingCount = interactiveSessions.filter(
+          (c) =>
+            c.turnState === "working" ||
+            (c.turnState === "unknown" && c.cpuPercent > ACTIVE_CPU_THRESHOLD)
+        ).length;
         const activeCpu = currentSessions.reduce(
           (s, c) => s + c.cpuPercent,
           0
         );
         const point = {
           timestamp: now,
-          count: interactiveSessions.length,
+          count: workingCount,
           activeCpu,
         };
         const cutoff = now - 60 * 60 * 1000;
@@ -485,8 +492,17 @@ export default function App() {
   const interactive = sessions.filter((s) => !s.isSubagent);
   const subagents = sessions.filter((s) => s.isSubagent);
 
-  const activeSessions = interactive.filter((s) => s.cpuPercent > 0.5);
-  const idleSessions = interactive.filter((s) => s.cpuPercent <= 0.5);
+  // Primary: JSONL turn state (deterministic). Fallback: CPU for "unknown" state.
+  const activeSessions = interactive.filter(
+    (s) =>
+      s.turnState === "working" ||
+      (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD)
+  );
+  const idleSessions = interactive.filter(
+    (s) =>
+      s.turnState === "idle" ||
+      (s.turnState === "unknown" && s.cpuPercent <= ACTIVE_CPU_THRESHOLD)
+  );
   const totalMemGB = (
     sessions.reduce((sum, s) => sum + s.rssMB, 0) / 1024
   ).toFixed(1);
@@ -722,18 +738,20 @@ export default function App() {
                   : s.flags.includes("continue")
                     ? "cyan"
                     : ("white" as const);
-              const dot =
-                s.cpuPercent > 10
+              const isWorking =
+                s.turnState === "working" ||
+                (s.turnState === "unknown" &&
+                  s.cpuPercent > ACTIVE_CPU_THRESHOLD);
+              const dot = isWorking
+                ? s.cpuPercent > 10
                   ? "\u26a1"
-                  : s.cpuPercent > 0.5
-                    ? "\u25cf "
-                    : "\u25cb ";
-              const dotColor =
-                s.cpuPercent > 10
+                  : "\u25cf "
+                : "\u25cb ";
+              const dotColor = isWorking
+                ? s.cpuPercent > 10
                   ? "green"
-                  : s.cpuPercent > 0.5
-                    ? "yellow"
-                    : ("gray" as const);
+                  : "yellow"
+                : ("gray" as const);
 
               return (
                 <Text key={`s-${s.pid}`} wrap="truncate">
