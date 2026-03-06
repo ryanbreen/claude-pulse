@@ -9,6 +9,7 @@ import {
   type ClaudeSession,
   type HistoryEntry,
 } from "./scanner.js";
+import { reportSnapshot } from "./reporter.js";
 
 const SPARK = "▁▂▃▄▅▆▇█";
 const HEAT = ["·", "░", "▒", "▓", "█"];
@@ -187,6 +188,8 @@ export default function App() {
       setTick((t) => {
         if (t % 10 === 0) {
           setRecentHistory(getRecentHistory(24));
+          // Report to API every 30s (10 ticks * 3s)
+          reportSnapshot(currentSessions);
         }
         return t + 1;
       });

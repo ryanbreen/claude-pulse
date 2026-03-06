@@ -1,0 +1,12 @@
+{
+  "name": "claude-pulse-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-12-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "claude-pulse",
+      "database_id": "6b96e4e8-83d4-4dd8-b894-8ce60b22fecb"
+    }
+  ]
+}
