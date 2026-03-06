@@ -5,6 +5,7 @@ import { join } from "path";
 
 export interface ClaudeSession {
   pid: number;
+  ppid: number;
   tty: string;
   elapsed: string;
   elapsedSeconds: number;
@@ -14,6 +15,7 @@ export interface ClaudeSession {
   cwd: string;
   flags: string[];
   sessionId?: string;
+  isSubagent: boolean;
 }
 
 export interface HistoryEntry {
@@ -69,15 +71,18 @@ function batchGetCwd(pids: number[]): Map<number, string> {
 
 export function getActiveSessions(): ClaudeSession[] {
   try {
-    // Two-step: first find PIDs, then get details
     const psOutput = execSync(
-      `ps -eo pid,tty,etime,%cpu,rss,command 2>/dev/null`,
+      `ps -eo pid,ppid,tty,etime,%cpu,rss,command 2>/dev/null`,
       { encoding: "utf-8", timeout: 5000 }
     );
 
     const sessions: ClaudeSession[] = [];
-    for (const line of psOutput.trim().split("\n")) {
-      // Match lines where command is the claude binary (not /bin/sh wrapper)
+    // Collect all claude PIDs first so we can identify subagents
+    const claudePids = new Set<number>();
+
+    const lines = psOutput.trim().split("\n");
+    // First pass: collect all claude PIDs
+    for (const line of lines) {
       if (!line.includes("claude") || !line.includes("--")) continue;
       if (line.includes("/bin/sh") || line.includes("/bin/zsh")) continue;
       if (line.includes("grep")) continue;
@@ -85,15 +90,32 @@ export function getActiveSessions(): ClaudeSession[] {
       const match = line
         .trim()
         .match(
-          /^(\d+)\s+([\w?/]+)\s+([\d:.+-]+)\s+([\d.]+)\s+(\d+)\s+(.+)$/
+          /^(\d+)\s+(\d+)\s+([\w?/]+)\s+([\d:.+-]+)\s+([\d.]+)\s+(\d+)\s+(.+)$/
+        );
+      if (!match) continue;
+      const command = match[7].trim();
+      if (!command.match(/\bclaude\s+--/)) continue;
+      claudePids.add(parseInt(match[1]));
+    }
+
+    // Second pass: build sessions, detecting subagents
+    for (const line of lines) {
+      if (!line.includes("claude") || !line.includes("--")) continue;
+      if (line.includes("/bin/sh") || line.includes("/bin/zsh")) continue;
+      if (line.includes("grep")) continue;
+
+      const match = line
+        .trim()
+        .match(
+          /^(\d+)\s+(\d+)\s+([\w?/]+)\s+([\d:.+-]+)\s+([\d.]+)\s+(\d+)\s+(.+)$/
         );
       if (!match) continue;
 
-      const command = match[6].trim();
-      // Only match actual claude CLI invocations
+      const command = match[7].trim();
       if (!command.match(/\bclaude\s+--/)) continue;
 
       const pid = parseInt(match[1]);
+      const ppid = parseInt(match[2]);
 
       // Skip our own parent process
       if (pid === process.ppid) continue;
@@ -106,17 +128,22 @@ export function getActiveSessions(): ClaudeSession[] {
         /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/
       );
 
+      // A subagent's parent (or grandparent via /bin/sh) is another claude process
+      const isSubagent = claudePids.has(ppid);
+
       sessions.push({
         pid,
-        tty: match[2],
-        elapsed: match[3].trim(),
-        elapsedSeconds: parseElapsed(match[3]),
-        cpuPercent: parseFloat(match[4]),
-        rssMB: Math.round(parseInt(match[5]) / 1024),
+        ppid,
+        tty: match[3],
+        elapsed: match[4].trim(),
+        elapsedSeconds: parseElapsed(match[4]),
+        cpuPercent: parseFloat(match[5]),
+        rssMB: Math.round(parseInt(match[6]) / 1024),
         command,
-        cwd: "unknown", // filled in below
+        cwd: "unknown",
         flags,
         sessionId: sidMatch ? sidMatch[1] : undefined,
+        isSubagent,
       });
     }
 

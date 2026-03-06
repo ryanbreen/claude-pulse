@@ -25,15 +25,74 @@ export function getReportStatus(): ReportStatus {
   return { ...status };
 }
 
+export interface TrendBucket {
+  bucket: number;
+  peak_total: number;
+  peak_active: number;
+  avg_total: number;
+  avg_cpu: number;
+  peak_cpu: number;
+  peak_mem_mb: number;
+  sample_count: number;
+}
+
+export interface D1Stats {
+  day: {
+    peak_sessions: number;
+    peak_active: number;
+    avg_sessions: number;
+    peak_cpu: number;
+    peak_mem_mb: number;
+    samples: number;
+  };
+  week: {
+    peak_sessions: number;
+    peak_active: number;
+    avg_sessions: number;
+    peak_cpu: number;
+    peak_mem_mb: number;
+    samples: number;
+  };
+  latest: { ts: number } | null;
+}
+
+export async function fetchTrends(hours = 24): Promise<TrendBucket[]> {
+  if (!API_KEY) return [];
+  try {
+    const resp = await fetch(`${API_URL}/trends?hours=${hours}`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    if (!resp.ok) return [];
+    const body = (await resp.json()) as { trends: TrendBucket[] };
+    return body.trends ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchStats(): Promise<D1Stats | null> {
+  if (!API_KEY) return null;
+  try {
+    const resp = await fetch(`${API_URL}/stats`, {
+      headers: { "X-API-Key": API_KEY },
+    });
+    if (!resp.ok) return null;
+    return (await resp.json()) as D1Stats;
+  } catch {
+    return null;
+  }
+}
+
 export async function reportSnapshot(sessions?: ClaudeSession[]) {
   if (!API_KEY) return;
 
   const s = sessions ?? getActiveSessions();
-  const active = s.filter((x) => x.cpuPercent > 0.5);
-  const idle = s.filter((x) => x.cpuPercent <= 0.5);
+  const interactive = s.filter((x) => !x.isSubagent);
+  const active = interactive.filter((x) => x.cpuPercent > 0.5);
+  const idle = interactive.filter((x) => x.cpuPercent <= 0.5);
   const totalCpu = s.reduce((sum, x) => sum + x.cpuPercent, 0);
   const totalMem = s.reduce((sum, x) => sum + x.rssMB, 0);
-  const longest = s.reduce(
+  const longest = interactive.reduce(
     (max, x) => (x.elapsedSeconds > max ? x.elapsedSeconds : max),
     0
   );
@@ -41,7 +100,7 @@ export async function reportSnapshot(sessions?: ClaudeSession[]) {
   const payload = {
     active_count: active.length,
     idle_count: idle.length,
-    total_count: s.length,
+    total_count: interactive.length,
     total_cpu: Math.round(totalCpu * 10) / 10,
     total_mem_mb: totalMem,
     longest_seconds: longest,
