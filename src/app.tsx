@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text, useApp, useInput, useStdin } from "ink";
+import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import {
   getActiveSessions,
   getRecentHistory,
@@ -13,9 +13,18 @@ import {
 const SPARK = "▁▂▃▄▅▆▇█";
 const HEAT = ["·", "░", "▒", "▓", "█"];
 
-function spark(data: number[]): string {
+function spark(data: number[], width: number): string {
   if (data.length === 0) return "";
   const max = Math.max(...data, 1);
+  // Resample data to fit width
+  if (data.length > width) {
+    const step = data.length / width;
+    const resampled: number[] = [];
+    for (let i = 0; i < width; i++) {
+      resampled.push(data[Math.floor(i * step)]);
+    }
+    data = resampled;
+  }
   return data
     .map((v) => SPARK[Math.min(Math.floor((v / max) * 7), 7)])
     .join("");
@@ -32,10 +41,13 @@ function Gauge({
   width: number;
   label: string;
 }) {
-  const filled = Math.round((value / Math.max(max, 1)) * width);
+  const labelStr = `${label} `;
+  const suffixStr = ` ${value}/${max}`;
+  const barWidth = Math.max(width - labelStr.length - suffixStr.length, 10);
+  const filled = Math.round((value / Math.max(max, 1)) * barWidth);
   const bar =
-    "█".repeat(Math.min(filled, width)) +
-    "░".repeat(Math.max(width - filled, 0));
+    "█".repeat(Math.min(filled, barWidth)) +
+    "░".repeat(Math.max(barWidth - filled, 0));
   const color =
     value === 0
       ? "gray"
@@ -45,43 +57,57 @@ function Gauge({
           ? "yellow"
           : "red";
   return (
-    <Box>
-      <Text dimColor>{label} </Text>
+    <Text>
+      <Text dimColor>{labelStr}</Text>
       <Text color={color}>{bar}</Text>
-      <Text dimColor>
-        {" "}
-        {value}/{max}
-      </Text>
-    </Box>
+      <Text dimColor>{suffixStr}</Text>
+    </Text>
   );
 }
 
-function HourlyHeatmap({ history }: { history: HistoryEntry[] }) {
-  // 72 buckets = 20-minute intervals across 24 hours
-  const BUCKETS = 72;
-  const buckets = new Array(BUCKETS).fill(0);
+function HourlyHeatmap({
+  history,
+  width,
+}: {
+  history: HistoryEntry[];
+  width: number;
+}) {
+  // Scale buckets to fill available width
+  // Each bucket = (24*60) / width minutes
+  const bucketCount = Math.max(width, 24);
+  const minutesPerBucket = (24 * 60) / bucketCount;
+  const buckets = new Array(bucketCount).fill(0);
   const now = new Date();
-  const currentBucket = now.getHours() * 3 + Math.floor(now.getMinutes() / 20);
+  const currentBucket = Math.floor(
+    (now.getHours() * 60 + now.getMinutes()) / minutesPerBucket
+  );
 
   for (const entry of history) {
     const d = new Date(entry.timestamp);
-    const bucket = d.getHours() * 3 + Math.floor(d.getMinutes() / 20);
-    buckets[bucket]++;
+    const bucket = Math.floor(
+      (d.getHours() * 60 + d.getMinutes()) / minutesPerBucket
+    );
+    if (bucket < bucketCount) buckets[bucket]++;
   }
   const max = Math.max(...buckets, 1);
 
-  // Build hour labels aligned to the 72-char width (every 3 chars = 1 hour)
-  const labels = new Array(BUCKETS).fill(" ");
-  for (let h = 0; h < 24; h += 3) {
-    const pos = h * 3;
-    const lbl = String(h).padStart(2);
-    labels[pos] = lbl[0];
-    labels[pos + 1] = lbl[1];
+  // Build hour labels spaced across the width
+  const labels = new Array(bucketCount).fill(" ");
+  const hoursToLabel = [0, 3, 6, 9, 12, 15, 18, 21];
+  for (const h of hoursToLabel) {
+    const pos = Math.floor((h * 60) / minutesPerBucket);
+    if (pos + 1 < bucketCount) {
+      const lbl = String(h).padStart(2);
+      labels[pos] = lbl[0];
+      labels[pos + 1] = lbl[1];
+    }
   }
 
   return (
     <Box flexDirection="column">
-      <Text dimColor>24H ACTIVITY (20-min buckets)</Text>
+      <Text dimColor>
+        24H ACTIVITY ({Math.round(minutesPerBucket)}-min buckets)
+      </Text>
       <Box>
         {buckets.map((count, i) => {
           const level = Math.min(Math.floor((count / max) * 4), 4);
@@ -123,6 +149,10 @@ function KeyHandler() {
 }
 
 export default function App() {
+  const { stdout } = useStdout();
+  const termWidth = stdout?.columns ?? 120;
+  const W = termWidth - 2; // account for paddingX={1}
+
   const [sessions, setSessions] = useState<ClaudeSession[]>(getActiveSessions);
   const [timeline, setTimeline] = useState<HistoryPoint[]>([]);
   const [recentHistory, setRecentHistory] = useState<HistoryEntry[]>(() =>
@@ -157,7 +187,6 @@ export default function App() {
         return filtered;
       });
 
-      // Refresh history less frequently (every 10 ticks = 30s)
       setTick((t) => {
         if (t % 10 === 0) {
           setRecentHistory(getRecentHistory(24));
@@ -198,7 +227,6 @@ export default function App() {
   const now = new Date();
   const timeStr = now.toLocaleTimeString();
 
-  // Group sessions by project directory (first 2 meaningful path segments)
   const projectGroups = new Map<string, ClaudeSession[]>();
   for (const s of sessions) {
     const key = shortenPath(s.cwd, 35);
@@ -207,52 +235,57 @@ export default function App() {
     projectGroups.set(key, group);
   }
 
+  const sep = "─".repeat(W);
+
+  // Calculate how much space the directory column gets
+  // Columns: dot(2) + PID(7) + TTY(7) + UPTIME(10) + CPU(7) + MEM(7) + MODE(9) = 49 fixed
+  const fixedCols = 49;
+  const dirWidth = Math.max(W - fixedCols, 20);
+
+  // Sparkline width: label(10) + sparkline + suffix(~12)
+  const sparkWidth = Math.max(W - 25, 20);
+
   return (
     <Box flexDirection="column" paddingX={1}>
       <KeyHandler />
       {/* Header */}
       <Box justifyContent="space-between">
-        <Box>
-          <Text bold color="magenta">
-            {"  "}
-          </Text>
-          <Text bold color="cyan">
-            CLAUDE PULSE
-          </Text>
-        </Box>
+        <Text bold color="cyan">
+          CLAUDE PULSE
+        </Text>
         <Text dimColor>
           {timeStr} | 3s refresh | q quit
         </Text>
       </Box>
 
       <Box marginTop={1}>
-        <Text dimColor>{"─".repeat(72)}</Text>
+        <Text dimColor>{sep}</Text>
       </Box>
 
       {/* Stats Row 1 */}
       <Box marginTop={1} gap={2}>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>ACTIVE</Text>
           <Text bold color="green">
             {" "}
             {activeSessions.length}
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>IDLE</Text>
           <Text bold color="yellow">
             {" "}
             {idleSessions.length}
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>TOTAL</Text>
           <Text bold>
             {" "}
             {sessions.length}
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>CPU</Text>
           <Text
             bold
@@ -262,39 +295,39 @@ export default function App() {
             {totalCpu.toFixed(1)}%
           </Text>
         </Box>
-      </Box>
-
-      {/* Stats Row 2 */}
-      <Box gap={2}>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>MEMORY</Text>
           <Text bold>
             {" "}
             {totalMemGB} GB
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+      </Box>
+
+      {/* Stats Row 2 */}
+      <Box gap={2}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>LONGEST</Text>
           <Text bold color="yellow">
             {" "}
             {formatDuration(longestSession)}
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>24H SESSIONS</Text>
           <Text bold>
             {" "}
             {uniqueSessions24h.size}
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>24H PROJECTS</Text>
           <Text bold>
             {" "}
             {uniqueProjects.size}
           </Text>
         </Box>
-        <Box flexDirection="column" width={16}>
+        <Box flexDirection="column" flexGrow={1}>
           <Text dimColor>24H PEAK</Text>
           <Text bold color="magenta">
             {" "}
@@ -305,35 +338,33 @@ export default function App() {
 
       {/* Charts */}
       <Box marginTop={1}>
-        <Text dimColor>{"─".repeat(72)}</Text>
+        <Text dimColor>{sep}</Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
-        <Box gap={4}>
-          <Box flexDirection="column">
-            <Text dimColor>SESSIONS </Text>
-            <Text color="cyan">
-              {spark(countData)}
-              <Text dimColor> peak {peakSessions}</Text>
+        <Box flexDirection="column">
+          <Text dimColor>SESSIONS</Text>
+          <Text color="cyan">
+            {spark(countData, sparkWidth)}
+            <Text dimColor> peak {peakSessions}</Text>
+          </Text>
+        </Box>
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>CPU LOAD</Text>
+          <Text color="red">
+            {spark(cpuData, sparkWidth)}
+            <Text dimColor>
+              {" "}
+              peak {Math.max(...cpuData, 0).toFixed(0)}%
             </Text>
-          </Box>
-          <Box flexDirection="column">
-            <Text dimColor>CPU LOAD </Text>
-            <Text color="red">
-              {spark(cpuData)}
-              <Text dimColor>
-                {" "}
-                peak {Math.max(...cpuData, 0).toFixed(0)}%
-              </Text>
-            </Text>
-          </Box>
+          </Text>
         </Box>
 
         <Box marginTop={1}>
           <Gauge
             value={activeSessions.length}
             max={Math.max(sessions.length, 1)}
-            width={35}
+            width={W}
             label="Working"
           />
         </Box>
@@ -341,17 +372,16 @@ export default function App() {
 
       {/* Heatmap */}
       <Box marginTop={1}>
-        <HourlyHeatmap history={recentHistory} />
+        <HourlyHeatmap history={recentHistory} width={W} />
       </Box>
 
       {/* Session List */}
       <Box marginTop={1}>
-        <Text dimColor>{"─".repeat(72)}</Text>
+        <Text dimColor>{sep}</Text>
       </Box>
 
       <Box flexDirection="column">
-        {/* Table header */}
-        <Text dimColor bold>
+        <Text dimColor bold wrap="truncate">
           {"  "}
           {"PID".padEnd(7)}
           {"TTY".padEnd(7)}
@@ -363,7 +393,7 @@ export default function App() {
         </Text>
 
         {sessions.map((s) => {
-          const dir = shortenPath(s.cwd, 30);
+          const dir = shortenPath(s.cwd, dirWidth);
           const mode = s.flags.join(",") || "new";
           const uptime = formatDuration(s.elapsedSeconds);
           const cpu = s.cpuPercent.toFixed(1);
@@ -418,12 +448,10 @@ export default function App() {
 
       {/* Footer */}
       <Box marginTop={1}>
-        <Text dimColor>{"─".repeat(72)}</Text>
+        <Text dimColor>{sep}</Text>
       </Box>
       <Box justifyContent="space-between">
-        <Text dimColor>
-          scan #{tick}
-        </Text>
+        <Text dimColor>scan #{tick}</Text>
         <Text dimColor>
           {sessions.length} sessions | {projectGroups.size} projects |{" "}
           {totalMemGB} GB

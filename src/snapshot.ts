@@ -9,6 +9,7 @@ import {
 const HEAT = ["·", "░", "▒", "▓", "█"];
 
 export function renderSnapshot(): string {
+  const W = process.stdout.columns || 120;
   const sessions = getActiveSessions();
   const history = getRecentHistory(24);
   const active = sessions.filter((s) => s.cpuPercent > 0.5);
@@ -28,38 +29,48 @@ export function renderSnapshot(): string {
     history.map((h) => h.project).filter(Boolean)
   );
 
-  // Heatmap - 72 buckets (20-min intervals)
-  const BUCKETS = 72;
-  const buckets = new Array(BUCKETS).fill(0);
+  // Heatmap - scale to terminal width
+  const heatWidth = W - 2;
+  const minutesPerBucket = (24 * 60) / heatWidth;
+  const buckets = new Array(heatWidth).fill(0);
   for (const entry of history) {
     const d = new Date(entry.timestamp);
-    const bucket = d.getHours() * 3 + Math.floor(d.getMinutes() / 20);
-    buckets[bucket]++;
+    const bucket = Math.floor(
+      (d.getHours() * 60 + d.getMinutes()) / minutesPerBucket
+    );
+    if (bucket < heatWidth) buckets[bucket]++;
   }
   const heatMax = Math.max(...buckets, 1);
   const heatmap = buckets
     .map((c) => HEAT[Math.min(Math.floor((c / heatMax) * 4), 4)])
     .join("");
-  const labels = new Array(BUCKETS).fill(" ");
-  for (let h = 0; h < 24; h += 3) {
-    const pos = h * 3;
-    const lbl = String(h).padStart(2);
-    labels[pos] = lbl[0];
-    labels[pos + 1] = lbl[1];
+  const labels = new Array(heatWidth).fill(" ");
+  for (const h of [0, 3, 6, 9, 12, 15, 18, 21]) {
+    const pos = Math.floor((h * 60) / minutesPerBucket);
+    if (pos + 1 < heatWidth) {
+      const lbl = String(h).padStart(2);
+      labels[pos] = lbl[0];
+      labels[pos + 1] = lbl[1];
+    }
   }
 
-  const sep = "─".repeat(72);
+  const sep = "─".repeat(W);
   const lines: string[] = [];
   const time = new Date().toLocaleTimeString();
+  const peak = getPeakConcurrent(history);
 
-  lines.push(`  CLAUDE PULSE                        ${time}`);
+  // Fixed columns: dot(2) + PID(7) + TTY(7) + UPTIME(10) + CPU(7) + MEM(7) + MODE(9) = 49
+  const dirWidth = Math.max(W - 51, 20);
+
+  lines.push(
+    `  CLAUDE PULSE${" ".repeat(Math.max(W - 14 - time.length - 2, 2))}${time}`
+  );
   lines.push(sep);
   lines.push(
-    `  ACTIVE: ${active.length}   IDLE: ${idle.length}   TOTAL: ${sessions.length}   CPU: ${totalCpu.toFixed(1)}%`
+    `  ACTIVE: ${active.length}   IDLE: ${idle.length}   TOTAL: ${sessions.length}   CPU: ${totalCpu.toFixed(1)}%   MEMORY: ${totalMem} GB`
   );
-  const peak = getPeakConcurrent(history);
   lines.push(
-    `  MEMORY: ${totalMem} GB   LONGEST: ${formatDuration(longest)}   24H: ${uniqueSessions.size} sessions / ${uniqueProjects.size} projects   PEAK: ${peak.count} @ ${peak.label}`
+    `  LONGEST: ${formatDuration(longest)}   24H: ${uniqueSessions.size} sessions / ${uniqueProjects.size} projects   PEAK: ${peak.count} @ ${peak.label}`
   );
   lines.push(sep);
   lines.push(`  ${heatmap}`);
@@ -72,7 +83,8 @@ export function renderSnapshot(): string {
     );
 
     for (const s of sessions) {
-      const dot = s.cpuPercent > 10 ? "⚡" : s.cpuPercent > 0.5 ? "● " : "○ ";
+      const dot =
+        s.cpuPercent > 10 ? "⚡" : s.cpuPercent > 0.5 ? "● " : "○ ";
       const line =
         `  ${dot}` +
         `${String(s.pid).padEnd(7)}` +
@@ -81,7 +93,7 @@ export function renderSnapshot(): string {
         `${(s.cpuPercent.toFixed(1) + "%").padEnd(7)}` +
         `${(s.rssMB + "M").padEnd(7)}` +
         `${(s.flags.join(",") || "new").padEnd(9)}` +
-        shortenPath(s.cwd, 30);
+        shortenPath(s.cwd, dirWidth);
       lines.push(line);
     }
   } else {
