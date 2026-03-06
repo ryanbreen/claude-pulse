@@ -9,7 +9,7 @@ import {
   type ClaudeSession,
   type HistoryEntry,
 } from "./scanner.js";
-import { reportSnapshot } from "./reporter.js";
+import { reportSnapshot, getReportStatus } from "./reporter.js";
 
 const SPARK = "▁▂▃▄▅▆▇█";
 const HEAT = ["·", "░", "▒", "▓", "█"];
@@ -446,10 +446,32 @@ export default function App() {
       </Box>
       <Box justifyContent="space-between">
         <Text dimColor>scan #{tick}</Text>
-        <Text dimColor>
-          {sessions.length} sessions | {projectGroups.size} projects |{" "}
-          {totalMemGB} GB
-        </Text>
+        <Box>
+          {(() => {
+            const rs = getReportStatus();
+            if (!rs.enabled) return <Text dimColor>D1: off (no API key)</Text>;
+            if (rs.lastError)
+              return (
+                <Text color="red">
+                  D1: err ({rs.lastError}) | {rs.totalSent} sent
+                </Text>
+              );
+            if (rs.lastSent) {
+              const ago = Math.round((Date.now() - rs.lastSent) / 1000);
+              return (
+                <Text color="green">
+                  D1: ok ({ago}s ago) | {rs.totalSent} sent
+                </Text>
+              );
+            }
+            return <Text dimColor>D1: waiting...</Text>;
+          })()}
+          <Text dimColor>
+            {" "}
+            | {sessions.length} sessions | {projectGroups.size} projects |{" "}
+            {totalMemGB} GB
+          </Text>
+        </Box>
       </Box>
     </Box>
   );
