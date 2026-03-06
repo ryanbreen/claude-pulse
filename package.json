@@ -7,7 +7,7 @@
     "claude-pulse": "./bin/claude-pulse.js"
   },
   "scripts": {
-    "dev": "tsx src/index.tsx",
+    "dev": "tsx --env-file=.env src/index.tsx",
     "build": "tsc",
     "start": "node dist/index.js"
   },
