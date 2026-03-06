@@ -236,14 +236,15 @@ export default function App() {
   }
 
   const sep = "─".repeat(W);
+  const colW = Math.floor(W / 5);
 
   // Calculate how much space the directory column gets
   // Columns: dot(2) + PID(7) + TTY(7) + UPTIME(10) + CPU(7) + MEM(7) + MODE(9) = 49 fixed
   const fixedCols = 49;
   const dirWidth = Math.max(W - fixedCols, 20);
 
-  // Sparkline width: label(10) + sparkline + suffix(~12)
-  const sparkWidth = Math.max(W - 25, 20);
+  // Sparkline fills full width minus the "peak XX" suffix
+  const sparkWidth = Math.max(W - 12, 20);
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -262,30 +263,30 @@ export default function App() {
         <Text dimColor>{sep}</Text>
       </Box>
 
-      {/* Stats Row 1 */}
-      <Box marginTop={1} gap={2}>
-        <Box flexDirection="column" flexGrow={1}>
+      {/* Stats Grid - 5 columns, aligned across both rows */}
+      <Box marginTop={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>ACTIVE</Text>
           <Text bold color="green">
             {" "}
             {activeSessions.length}
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>IDLE</Text>
           <Text bold color="yellow">
             {" "}
             {idleSessions.length}
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>TOTAL</Text>
           <Text bold>
             {" "}
             {sessions.length}
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>CPU</Text>
           <Text
             bold
@@ -295,7 +296,7 @@ export default function App() {
             {totalCpu.toFixed(1)}%
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>MEMORY</Text>
           <Text bold>
             {" "}
@@ -303,31 +304,29 @@ export default function App() {
           </Text>
         </Box>
       </Box>
-
-      {/* Stats Row 2 */}
-      <Box gap={2}>
-        <Box flexDirection="column" flexGrow={1}>
+      <Box>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>LONGEST</Text>
           <Text bold color="yellow">
             {" "}
             {formatDuration(longestSession)}
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>24H SESSIONS</Text>
           <Text bold>
             {" "}
             {uniqueSessions24h.size}
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>24H PROJECTS</Text>
           <Text bold>
             {" "}
             {uniqueProjects.size}
           </Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" width={colW}>
           <Text dimColor>24H PEAK</Text>
           <Text bold color="magenta">
             {" "}
@@ -342,32 +341,27 @@ export default function App() {
       </Box>
 
       <Box marginTop={1} flexDirection="column">
-        <Box flexDirection="column">
-          <Text dimColor>SESSIONS</Text>
-          <Text color="cyan">
-            {spark(countData, sparkWidth)}
-            <Text dimColor> peak {peakSessions}</Text>
-          </Text>
-        </Box>
-        <Box flexDirection="column" marginTop={1}>
-          <Text dimColor>CPU LOAD</Text>
-          <Text color="red">
-            {spark(cpuData, sparkWidth)}
-            <Text dimColor>
-              {" "}
-              peak {Math.max(...cpuData, 0).toFixed(0)}%
-            </Text>
-          </Text>
-        </Box>
+        <Text dimColor>SESSIONS</Text>
+        <Text color="cyan" wrap="truncate">
+          {spark(countData, sparkWidth)}
+          <Text dimColor> peak {peakSessions}</Text>
+        </Text>
 
-        <Box marginTop={1}>
-          <Gauge
-            value={activeSessions.length}
-            max={Math.max(sessions.length, 1)}
-            width={W}
-            label="Working"
-          />
-        </Box>
+        <Text dimColor>CPU LOAD</Text>
+        <Text color="red" wrap="truncate">
+          {spark(cpuData, sparkWidth)}
+          <Text dimColor>
+            {" "}
+            peak {Math.max(...cpuData, 0).toFixed(0)}%
+          </Text>
+        </Text>
+
+        <Gauge
+          value={activeSessions.length}
+          max={Math.max(sessions.length, 1)}
+          width={W}
+          label="Working"
+        />
       </Box>
 
       {/* Heatmap */}
