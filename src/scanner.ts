@@ -149,14 +149,22 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
 
         if (d.type === "user") {
           const content = d.message?.content;
-          // Distinguish human text from automatic tool_result
+          // Distinguish human text from automatic tool_result and local commands.
+          // Local commands (e.g. /login) write user entries with <local-command-*>
+          // or <command-name> tags — these don't trigger a Claude turn.
+          const isLocalCmd = (s: string) =>
+            s.includes("<local-command-") || s.includes("<command-name>");
           if (typeof content === "string" && content.length > 0) {
-            if (ts > lastHumanMessageTs) lastHumanMessageTs = ts;
+            if (!isLocalCmd(content) && ts > lastHumanMessageTs)
+              lastHumanMessageTs = ts;
           } else if (Array.isArray(content)) {
-            const hasText = content.some(
-              (c: any) => c.type === "text" && c.text?.length > 0
+            const hasHumanText = content.some(
+              (c: any) =>
+                c.type === "text" &&
+                c.text?.length > 0 &&
+                !isLocalCmd(c.text)
             );
-            if (hasText) {
+            if (hasHumanText) {
               if (ts > lastHumanMessageTs) lastHumanMessageTs = ts;
             }
           }

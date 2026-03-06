@@ -3,3 +3,4 @@ dist/
 worker/.dev.vars
 .env
 bin/claude-badge
+.envrc
