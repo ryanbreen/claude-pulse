@@ -323,7 +323,16 @@ export function getRecentHistory(hours: number = 24): HistoryEntry[] {
   if (!existsSync(historyPath)) return [];
 
   try {
-    const content = readFileSync(historyPath, "utf-8");
+    // Read only the tail of the file to avoid OOM on large history files.
+    // 512KB is generous for 48h of history data.
+    const fd = openSync(historyPath, "r");
+    const stat = fstatSync(fd);
+    const readSize = Math.min(stat.size, 524288);
+    const buffer = Buffer.alloc(readSize);
+    readSync(fd, buffer, 0, readSize, Math.max(0, stat.size - readSize));
+    closeSync(fd);
+
+    const content = buffer.toString("utf-8");
     const cutoff = Date.now() - hours * 3600 * 1000;
     const entries: HistoryEntry[] = [];
 
@@ -335,7 +344,7 @@ export function getRecentHistory(hours: number = 24): HistoryEntry[] {
           entries.push(entry);
         }
       } catch {
-        // skip malformed lines
+        // skip malformed lines (including partial first line from tail read)
       }
     }
 
