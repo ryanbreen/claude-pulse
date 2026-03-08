@@ -7,9 +7,9 @@
     "claude-pulse": "./bin/claude-pulse.js"
   },
   "scripts": {
-    "dev": "tsx --env-file=.env src/index.tsx",
+    "dev": "NODE_OPTIONS=--max-old-space-size=1024 tsx --env-file=.env src/index.tsx",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "NODE_OPTIONS=--max-old-space-size=1024 node dist/index.js"
   },
   "keywords": ["claude", "tui", "monitoring", "ink"],
   "author": "",
