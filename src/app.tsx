@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import {
   getActiveSessions,
@@ -425,6 +425,15 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
+  // Refs for comparing previous values to avoid unnecessary re-renders
+  const prevSessionsRef = useRef<string>("");
+  const prevRecentHistoryRef = useRef<string>("");
+  const prevTrendsRef = useRef<string>("");
+  const prevStatsRef = useRef<string>("");
+  const tickRef = useRef(0);
+  const historyLoadedRef = useRef(false);
+  const historyLoadingRef = useRef(false);
+
   useInput(
     (input, key) => {
       if (input === "q") exit();
@@ -437,13 +446,28 @@ export default function App() {
   // Fetch history data when switching to history tab
   useEffect(() => {
     if (mode !== "history") return;
-    if (historyLoaded) return;
+    if (historyLoadedRef.current) return;
 
-    setHistoryLoading(true);
+    if (!historyLoadingRef.current) {
+      historyLoadingRef.current = true;
+      setHistoryLoading(true);
+    }
     Promise.all([fetchTrends(24), fetchStats()]).then(([t, s]) => {
-      setTrends(t);
-      setStats(s);
-      setHistoryLoading(false);
+      const trendsJson = JSON.stringify(t);
+      if (trendsJson !== prevTrendsRef.current) {
+        prevTrendsRef.current = trendsJson;
+        setTrends(t);
+      }
+      const statsJson = JSON.stringify(s);
+      if (statsJson !== prevStatsRef.current) {
+        prevStatsRef.current = statsJson;
+        setStats(s);
+      }
+      if (historyLoadingRef.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
+      historyLoadedRef.current = true;
       setHistoryLoaded(true);
     });
   }, [mode, historyLoaded]);
@@ -453,8 +477,16 @@ export default function App() {
     if (mode !== "history") return;
     const interval = setInterval(() => {
       Promise.all([fetchTrends(24), fetchStats()]).then(([t, s]) => {
-        setTrends(t);
-        setStats(s);
+        const trendsJson = JSON.stringify(t);
+        if (trendsJson !== prevTrendsRef.current) {
+          prevTrendsRef.current = trendsJson;
+          setTrends(t);
+        }
+        const statsJson = JSON.stringify(s);
+        if (statsJson !== prevStatsRef.current) {
+          prevStatsRef.current = statsJson;
+          setStats(s);
+        }
       });
     }, 60000);
     return () => clearInterval(interval);
@@ -462,56 +494,88 @@ export default function App() {
 
   // Invalidate history cache when switching away
   useEffect(() => {
-    if (mode === "live") setHistoryLoaded(false);
+    if (mode === "live") {
+      if (historyLoadedRef.current) {
+        historyLoadedRef.current = false;
+        setHistoryLoaded(false);
+      }
+    }
   }, [mode]);
 
   useEffect(() => {
     const refresh = () => {
       const currentSessions = getActiveSessions();
-      setSessions(currentSessions);
       updateCompletedSessions(currentSessions);
 
+      // Only update sessions state if data actually changed
+      const sessionsKey = currentSessions
+        .map(
+          (s) =>
+            `${s.pid}:${s.cpuPercent}:${s.rssMB}:${s.turnState}:${s.elapsedSeconds}`
+        )
+        .join("|");
+      if (sessionsKey !== prevSessionsRef.current) {
+        prevSessionsRef.current = sessionsKey;
+        setSessions(currentSessions);
+      }
+
+      // Build the new timeline point
+      const now = Date.now();
+      const interactiveSessions = currentSessions.filter(
+        (c) => !c.isSubagent
+      );
+      const workingCount = interactiveSessions.filter(
+        (c) =>
+          c.turnState === "working" ||
+          (c.turnState === "unknown" && c.cpuPercent > ACTIVE_CPU_THRESHOLD)
+      ).length;
+      const activeCpu = currentSessions.reduce(
+        (s, c) => s + c.cpuPercent,
+        0
+      );
+      const point = {
+        timestamp: now,
+        count: workingCount,
+        activeCpu,
+      };
+
       setTimeline((prev) => {
-        const now = Date.now();
-        const interactiveSessions = currentSessions.filter(
-          (c) => !c.isSubagent
-        );
-        const workingCount = interactiveSessions.filter(
-          (c) =>
-            c.turnState === "working" ||
-            (c.turnState === "unknown" && c.cpuPercent > ACTIVE_CPU_THRESHOLD)
-        ).length;
-        const activeCpu = currentSessions.reduce(
-          (s, c) => s + c.cpuPercent,
-          0
-        );
-        const point = {
-          timestamp: now,
-          count: workingCount,
-          activeCpu,
-        };
         const cutoff = now - 60 * 60 * 1000;
         const filtered = [...prev, point].filter((p) => p.timestamp >= cutoff);
+        let result: HistoryPoint[];
         if (filtered.length > 60) {
           const step = Math.ceil(filtered.length / 60);
-          return filtered.filter(
+          result = filtered.filter(
             (_, i) => i % step === 0 || i === filtered.length - 1
           );
+        } else {
+          result = filtered;
         }
-        return filtered;
+        // Timeline always grows, so we always update it (the new point is always new)
+        return result;
       });
 
-      setTick((t) => {
-        if (t % 10 === 0) {
-          setRecentHistory(getRecentHistory(48));
-          reportSnapshot(currentSessions);
+      // Increment tick via ref; only trigger re-render for the tick display
+      tickRef.current += 1;
+      const currentTick = tickRef.current;
+
+      // Every 10th tick, refresh history and report snapshot
+      if (currentTick % 10 === 0) {
+        const newHistory = getRecentHistory(48);
+        const historyKey = newHistory
+          .map((h) => `${h.timestamp}:${h.sessionId}`)
+          .join("|");
+        if (historyKey !== prevRecentHistoryRef.current) {
+          prevRecentHistoryRef.current = historyKey;
+          setRecentHistory(newHistory);
         }
-        return t + 1;
-      });
+        reportSnapshot(currentSessions);
+      }
+
+      setTick(currentTick);
     };
 
     refresh();
-    setRecentHistory(getRecentHistory(48));
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, []);
