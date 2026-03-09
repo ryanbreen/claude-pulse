@@ -66,7 +66,9 @@ function parseElapsed(elapsed: string): number {
  *   - A `user` entry with text content (not tool_result) after the last turn_duration → working
  *   - Otherwise → unknown
  *
- * We read the last ~8KB of the file to find the most recent turn boundary.
+ * We read the last ~128KB of the file to find the most recent turn boundary.
+ * Large sessions (e.g. 137MB) can have individual entries >16KB (tool results
+ * with big code blocks), so 128KB ensures we reach actual turn signals.
  */
 function detectTurnState(cwd: string, sessionId?: string): TurnState {
   const home = homedir();
@@ -108,10 +110,10 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
   if (!jsonlPath) return "unknown";
 
   try {
-    // Read last ~16KB for enough context to find the turn boundary
+    // Read last ~128KB for enough context to find the turn boundary
     const fd = openSync(jsonlPath, "r");
     const stat = fstatSync(fd);
-    const readSize = Math.min(stat.size, 16384);
+    const readSize = Math.min(stat.size, 131072);
     const buffer = Buffer.alloc(readSize);
     readSync(fd, buffer, 0, readSize, Math.max(0, stat.size - readSize));
     closeSync(fd);
@@ -149,20 +151,23 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
 
         if (d.type === "user") {
           const content = d.message?.content;
-          // Distinguish human text from automatic tool_result and local commands.
-          // Local commands (e.g. /login) write user entries with <local-command-*>
-          // or <command-name> tags — these don't trigger a Claude turn.
-          const isLocalCmd = (s: string) =>
-            s.includes("<local-command-") || s.includes("<command-name>");
+          // Distinguish human text from non-prompt user entries:
+          // - Local commands (/login) write <local-command-*> / <command-name> tags
+          // - Ctrl-C cancellation writes [Request interrupted by user]
+          // None of these trigger a Claude turn.
+          const isNonPrompt = (s: string) =>
+            s.includes("<local-command-") ||
+            s.includes("<command-name>") ||
+            s.includes("[Request interrupted by user]");
           if (typeof content === "string" && content.length > 0) {
-            if (!isLocalCmd(content) && ts > lastHumanMessageTs)
+            if (!isNonPrompt(content) && ts > lastHumanMessageTs)
               lastHumanMessageTs = ts;
           } else if (Array.isArray(content)) {
             const hasHumanText = content.some(
               (c: any) =>
                 c.type === "text" &&
                 c.text?.length > 0 &&
-                !isLocalCmd(c.text)
+                !isNonPrompt(c.text)
             );
             if (hasHumanText) {
               if (ts > lastHumanMessageTs) lastHumanMessageTs = ts;
@@ -176,8 +181,9 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
 
     if (lastHumanMessageTs === 0 && lastTurnEndTs === 0) return "unknown";
     if (lastHumanMessageTs > lastTurnEndTs) {
-      // Human message is newer than last turn end — but check for stale turns.
-      // If Claude's last text response is after the human message and >30s old,
+      // Human message is newer than last turn end — check for stale states.
+
+      // If Claude responded after the human message and >30s old,
       // the turn is done but system entries were never written (crash/Ctrl-C).
       if (
         lastAssistantTextTs > lastHumanMessageTs &&
@@ -185,6 +191,16 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
       ) {
         return "idle";
       }
+
+      // If the human message itself is >60s old with no assistant response,
+      // the session is idle (cancelled, hook output, or never picked up).
+      if (
+        lastAssistantTextTs <= lastHumanMessageTs &&
+        Date.now() - lastHumanMessageTs > 60_000
+      ) {
+        return "idle";
+      }
+
       return "working";
     }
     return "idle";
