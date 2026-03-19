@@ -83,8 +83,14 @@ export async function fetchStats(): Promise<D1Stats | null> {
   }
 }
 
+let snapshotInFlight = false;
+
 export async function reportSnapshot(sessions?: ClaudeSession[]) {
   if (!API_KEY) return;
+  // Prevent concurrent requests from piling up if network is slow.
+  // Each holds request/response bodies in memory until resolved.
+  if (snapshotInFlight) return;
+  snapshotInFlight = true;
 
   const s = sessions ?? getActiveSessions();
   const interactive = s.filter((x) => !x.isSubagent);
@@ -146,5 +152,7 @@ export async function reportSnapshot(sessions?: ClaudeSession[]) {
   } catch (e: any) {
     status.totalErrors++;
     status.lastError = e.message ?? "network error";
+  } finally {
+    snapshotInFlight = false;
   }
 }

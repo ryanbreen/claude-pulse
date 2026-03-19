@@ -562,9 +562,9 @@ export default function App() {
       // Every 10th tick, refresh history and report snapshot
       if (currentTick % 10 === 0) {
         const newHistory = getRecentHistory(48);
-        const historyKey = newHistory
-          .map((h) => `${h.timestamp}:${h.sessionId}`)
-          .join("|");
+        // Use length + last timestamp as a lightweight fingerprint instead of
+        // joining every entry into a huge string (was ~100KB+ with 2000 entries)
+        const historyKey = `${newHistory.length}:${newHistory[newHistory.length - 1]?.timestamp ?? 0}`;
         if (historyKey !== prevRecentHistoryRef.current) {
           prevRecentHistoryRef.current = historyKey;
           setRecentHistory(newHistory);

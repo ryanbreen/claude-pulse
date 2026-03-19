@@ -1,13 +1,11 @@
 import { execSync } from "child_process";
 import {
-  readFileSync,
   existsSync,
   readdirSync,
   statSync,
   openSync,
   readSync,
   closeSync,
-  fstatSync,
 } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -15,6 +13,19 @@ import { join } from "path";
 // CPU threshold kept as a secondary signal for display (dot color, sparklines).
 // Primary "working" detection uses JSONL turn state, not CPU.
 export const ACTIVE_CPU_THRESHOLD = 3.0;
+
+// Caches to avoid re-reading unchanged files every 3s poll cycle.
+// Without caching, 18 sessions × 128KB reads × JSON.parse every 3s
+// fragments V8's heap until OOM after ~20 hours.
+const turnStateCache = new Map<
+  string,
+  { mtimeMs: number; state: TurnState }
+>();
+let historyCache: {
+  mtimeMs: number;
+  size: number;
+  allEntries: HistoryEntry[];
+} | null = null;
 
 export type TurnState = "working" | "idle" | "unknown";
 
@@ -110,12 +121,18 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
   if (!jsonlPath) return "unknown";
 
   try {
+    // Check cache: skip re-reading if file hasn't been modified
+    const fileStat = statSync(jsonlPath);
+    const cached = turnStateCache.get(jsonlPath);
+    if (cached && cached.mtimeMs === fileStat.mtimeMs) {
+      return cached.state;
+    }
+
     // Read last ~128KB for enough context to find the turn boundary
     const fd = openSync(jsonlPath, "r");
-    const stat = fstatSync(fd);
-    const readSize = Math.min(stat.size, 131072);
+    const readSize = Math.min(fileStat.size, 131072);
     const buffer = Buffer.alloc(readSize);
-    readSync(fd, buffer, 0, readSize, Math.max(0, stat.size - readSize));
+    readSync(fd, buffer, 0, readSize, Math.max(0, fileStat.size - readSize));
     closeSync(fd);
 
     const tail = buffer.toString("utf-8");
@@ -131,6 +148,38 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
 
     for (const line of lines) {
       try {
+        // For large lines (tool results, big code blocks), avoid full JSON.parse
+        // which allocates huge object graphs that fragment the V8 heap over time.
+        if (line.length > 4096) {
+          const typeMatch = line.match(/^\{"type":"(\w+)"/);
+          if (!typeMatch) continue;
+          const type = typeMatch[1];
+          const tsMatch = line.match(/"timestamp":"([^"]+)"/);
+          const ts = tsMatch ? new Date(tsMatch[1]).getTime() : 0;
+
+          if (type === "system") {
+            // System entries are usually small; parse fully if >4KB (rare)
+            const d = JSON.parse(line);
+            const sub = d.subtype;
+            if (sub === "turn_duration" || sub === "stop_hook_summary") {
+              if (ts > lastTurnEndTs) lastTurnEndTs = ts;
+            }
+          } else if (type === "assistant") {
+            if (line.includes('"type":"text"') && ts > lastAssistantTextTs) {
+              lastAssistantTextTs = ts;
+            }
+          } else if (type === "user") {
+            if (
+              line.includes("tool_result") ||
+              line.includes("<local-command-") ||
+              line.includes("[Request interrupted by user]")
+            )
+              continue;
+            if (ts > lastHumanMessageTs) lastHumanMessageTs = ts;
+          }
+          continue;
+        }
+
         const d = JSON.parse(line);
         const ts = d.timestamp ? new Date(d.timestamp).getTime() : 0;
 
@@ -179,8 +228,10 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
       }
     }
 
-    if (lastHumanMessageTs === 0 && lastTurnEndTs === 0) return "unknown";
-    if (lastHumanMessageTs > lastTurnEndTs) {
+    let state: TurnState;
+    if (lastHumanMessageTs === 0 && lastTurnEndTs === 0) {
+      state = "unknown";
+    } else if (lastHumanMessageTs > lastTurnEndTs) {
       // Human message is newer than last turn end — check for stale states.
 
       // If Claude responded after the human message and >30s old,
@@ -189,21 +240,31 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
         lastAssistantTextTs > lastHumanMessageTs &&
         Date.now() - lastAssistantTextTs > 30_000
       ) {
-        return "idle";
+        state = "idle";
       }
-
       // If the human message itself is >60s old with no assistant response,
       // the session is idle (cancelled, hook output, or never picked up).
-      if (
+      else if (
         lastAssistantTextTs <= lastHumanMessageTs &&
         Date.now() - lastHumanMessageTs > 60_000
       ) {
-        return "idle";
+        state = "idle";
+      } else {
+        state = "working";
       }
-
-      return "working";
+    } else {
+      state = "idle";
     }
-    return "idle";
+
+    turnStateCache.set(jsonlPath, { mtimeMs: fileStat.mtimeMs, state });
+
+    // Prune cache entries for sessions that no longer exist
+    if (turnStateCache.size > 100) {
+      const first = turnStateCache.keys().next().value;
+      if (first) turnStateCache.delete(first);
+    }
+
+    return state;
   } catch {
     return "unknown";
   }
@@ -339,32 +400,45 @@ export function getRecentHistory(hours: number = 24): HistoryEntry[] {
   if (!existsSync(historyPath)) return [];
 
   try {
+    // Check cache: skip re-reading if file hasn't changed
+    const fileStat = statSync(historyPath);
+    if (
+      historyCache &&
+      historyCache.mtimeMs === fileStat.mtimeMs &&
+      historyCache.size === fileStat.size
+    ) {
+      const cutoff = Date.now() - hours * 3600 * 1000;
+      return historyCache.allEntries.filter((e) => e.timestamp >= cutoff);
+    }
+
     // Read only the tail of the file to avoid OOM on large history files.
     // 512KB is generous for 48h of history data.
     const fd = openSync(historyPath, "r");
-    const stat = fstatSync(fd);
-    const readSize = Math.min(stat.size, 524288);
+    const readSize = Math.min(fileStat.size, 524288);
     const buffer = Buffer.alloc(readSize);
-    readSync(fd, buffer, 0, readSize, Math.max(0, stat.size - readSize));
+    readSync(fd, buffer, 0, readSize, Math.max(0, fileStat.size - readSize));
     closeSync(fd);
 
     const content = buffer.toString("utf-8");
-    const cutoff = Date.now() - hours * 3600 * 1000;
-    const entries: HistoryEntry[] = [];
+    const allEntries: HistoryEntry[] = [];
 
     for (const line of content.split("\n")) {
       if (!line.trim()) continue;
       try {
-        const entry = JSON.parse(line) as HistoryEntry;
-        if (entry.timestamp >= cutoff) {
-          entries.push(entry);
-        }
+        allEntries.push(JSON.parse(line) as HistoryEntry);
       } catch {
         // skip malformed lines (including partial first line from tail read)
       }
     }
 
-    return entries;
+    historyCache = {
+      mtimeMs: fileStat.mtimeMs,
+      size: fileStat.size,
+      allEntries,
+    };
+
+    const cutoff = Date.now() - hours * 3600 * 1000;
+    return allEntries.filter((e) => e.timestamp >= cutoff);
   } catch {
     return [];
   }
