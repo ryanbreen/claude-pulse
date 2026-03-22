@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import {
   getActiveSessions,
@@ -9,6 +9,7 @@ import {
   ACTIVE_CPU_THRESHOLD,
   type ClaudeSession,
   type HistoryEntry,
+  type PeakActivity,
   type TurnState,
 } from "./scanner.js";
 import {
@@ -25,6 +26,56 @@ const SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
 const HEAT = ["\u00b7", "\u2591", "\u2592", "\u2593", "\u2588"];
 
 type TabMode = "live" | "history";
+
+// Pre-computed digest replaces storing thousands of HistoryEntry objects in
+// React state. Only small arrays of numbers and a few scalars — no object
+// graphs for React/Ink to retain across double-buffered fiber trees.
+interface HistoryDigest {
+  todayMinutes: number[];       // 1440 per-minute activity counts for today
+  yesterdayMinutes: number[];   // 1440 per-minute activity counts for yesterday
+  uniqueProjectCount: number;
+  uniqueSessionCount: number;
+  peak: PeakActivity;
+}
+
+function computeHistoryDigest(entries: HistoryEntry[]): HistoryDigest {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+  const cutoff24h = Date.now() - 24 * 3600 * 1000;
+
+  const todayMinutes = new Array(1440).fill(0);
+  const yesterdayMinutes = new Array(1440).fill(0);
+  const projects = new Set<string>();
+  const sessions = new Set<string>();
+  const entries24h: HistoryEntry[] = [];
+
+  for (const entry of entries) {
+    const ts = entry.timestamp;
+    const d = new Date(ts);
+    const minute = d.getHours() * 60 + d.getMinutes();
+
+    if (ts >= todayStart) {
+      todayMinutes[minute]++;
+    } else if (ts >= yesterdayStart) {
+      yesterdayMinutes[minute]++;
+    }
+
+    if (ts >= cutoff24h) {
+      if (entry.project) projects.add(entry.project);
+      if (entry.sessionId) sessions.add(entry.sessionId);
+      entries24h.push(entry);
+    }
+  }
+
+  return {
+    todayMinutes,
+    yesterdayMinutes,
+    uniqueProjectCount: projects.size,
+    uniqueSessionCount: sessions.size,
+    peak: getPeakConcurrent(entries24h),
+  };
+}
 
 function spark(data: number[], width: number): string {
   if (data.length === 0) return SPARK[0].repeat(width);
@@ -75,39 +126,30 @@ function Gauge({
 }
 
 function HourlyHeatmap({
-  history,
+  todayMinutes,
+  yesterdayMinutes,
   width,
 }: {
-  history: HistoryEntry[];
+  todayMinutes: number[];
+  yesterdayMinutes: number[];
   width: number;
 }) {
   const labelWidth = 6; // "TODAY " or "YEST "
   const barWidth = Math.max(width - labelWidth, 24);
-  const minutesPerBucket = (24 * 60) / barWidth;
+  const minutesPerBucket = 1440 / barWidth;
 
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterdayStart = todayStart - 86400000;
-
+  // Resample per-minute counts to display-width buckets
   const todayBuckets = new Array(barWidth).fill(0);
   const yesterdayBuckets = new Array(barWidth).fill(0);
-
-  for (const entry of history) {
-    const ts = entry.timestamp;
-    const d = new Date(ts);
-    const bucket = Math.floor(
-      (d.getHours() * 60 + d.getMinutes()) / minutesPerBucket
-    );
-    if (bucket >= barWidth) continue;
-    if (ts >= todayStart) {
-      todayBuckets[bucket]++;
-    } else if (ts >= yesterdayStart) {
-      yesterdayBuckets[bucket]++;
-    }
+  for (let i = 0; i < 1440; i++) {
+    const bucket = Math.min(Math.floor(i / minutesPerBucket), barWidth - 1);
+    todayBuckets[bucket] += todayMinutes[i];
+    yesterdayBuckets[bucket] += yesterdayMinutes[i];
   }
 
   // Use shared max so the two rows are comparable
   const max = Math.max(...todayBuckets, ...yesterdayBuckets, 1);
+  const now = new Date();
   const currentBucket = Math.floor(
     (now.getHours() * 60 + now.getMinutes()) / minutesPerBucket
   );
@@ -404,6 +446,14 @@ function HistoryView({
   );
 }
 
+const EMPTY_DIGEST: HistoryDigest = {
+  todayMinutes: new Array(1440).fill(0),
+  yesterdayMinutes: new Array(1440).fill(0),
+  uniqueProjectCount: 0,
+  uniqueSessionCount: 0,
+  peak: { count: 0, hour: 0, minute: 0, label: "0:00am" },
+};
+
 export default function App() {
   const { exit } = useApp();
   const { isRawModeSupported } = useStdin();
@@ -414,9 +464,15 @@ export default function App() {
   const [mode, setMode] = useState<TabMode>("live");
   const [sessions, setSessions] = useState<ClaudeSession[]>(getActiveSessions);
   const [timeline, setTimeline] = useState<HistoryPoint[]>([]);
-  const [recentHistory, setRecentHistory] = useState<HistoryEntry[]>(() =>
-    getRecentHistory(48)
-  );
+  // Store only a compact digest — NOT thousands of raw HistoryEntry objects.
+  // This prevents React's fiber tree from retaining huge object graphs.
+  const [historyDigest, setHistoryDigest] = useState<HistoryDigest>(() => {
+    try {
+      return computeHistoryDigest(getRecentHistory(48));
+    } catch {
+      return EMPTY_DIGEST;
+    }
+  });
   const [tick, setTick] = useState(0);
 
   // History tab state
@@ -427,7 +483,7 @@ export default function App() {
 
   // Refs for comparing previous values to avoid unnecessary re-renders
   const prevSessionsRef = useRef<string>("");
-  const prevRecentHistoryRef = useRef<string>("");
+  const prevHistoryKeyRef = useRef<string>("");
   const prevTrendsRef = useRef<string>("");
   const prevStatsRef = useRef<string>("");
   const tickRef = useRef(0);
@@ -551,7 +607,6 @@ export default function App() {
         } else {
           result = filtered;
         }
-        // Timeline always grows, so we always update it (the new point is always new)
         return result;
       });
 
@@ -559,15 +614,16 @@ export default function App() {
       tickRef.current += 1;
       const currentTick = tickRef.current;
 
-      // Every 10th tick, refresh history and report snapshot
+      // Every 10th tick, refresh history digest and report snapshot
       if (currentTick % 10 === 0) {
         const newHistory = getRecentHistory(48);
-        // Use length + last timestamp as a lightweight fingerprint instead of
-        // joining every entry into a huge string (was ~100KB+ with 2000 entries)
+        // Lightweight fingerprint — no huge string construction
         const historyKey = `${newHistory.length}:${newHistory[newHistory.length - 1]?.timestamp ?? 0}`;
-        if (historyKey !== prevRecentHistoryRef.current) {
-          prevRecentHistoryRef.current = historyKey;
-          setRecentHistory(newHistory);
+        if (historyKey !== prevHistoryKeyRef.current) {
+          prevHistoryKeyRef.current = historyKey;
+          // Compute digest immediately — newHistory becomes eligible for GC
+          // as soon as computeHistoryDigest returns. No raw entries stored in React.
+          setHistoryDigest(computeHistoryDigest(newHistory));
         }
         reportSnapshot(currentSessions);
       }
@@ -603,16 +659,6 @@ export default function App() {
     (max, s) => (s.elapsedSeconds > max ? s.elapsedSeconds : max),
     0
   );
-
-  const cutoff24h = Date.now() - 24 * 3600 * 1000;
-  const history24h = recentHistory.filter((h) => h.timestamp >= cutoff24h);
-  const uniqueProjects = new Set(
-    history24h.map((h) => h.project).filter(Boolean)
-  );
-  const uniqueSessions24h = new Set(
-    history24h.map((h) => h.sessionId).filter(Boolean)
-  );
-  const peak24h = getPeakConcurrent(history24h);
 
   const countData = timeline.map((h) => h.count);
   const cpuData = timeline.map((h) => h.activeCpu);
@@ -653,6 +699,9 @@ export default function App() {
     lastSyncStr = "pending";
     lastSyncColor = "gray";
   }
+
+  // Heap size for footer display
+  const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -729,21 +778,21 @@ export default function App() {
               <Text dimColor>24H SESSIONS</Text>
               <Text bold>
                 {" "}
-                {uniqueSessions24h.size}
+                {historyDigest.uniqueSessionCount}
               </Text>
             </Box>
             <Box flexDirection="column" width={colW}>
               <Text dimColor>24H PROJECTS</Text>
               <Text bold>
                 {" "}
-                {uniqueProjects.size}
+                {historyDigest.uniqueProjectCount}
               </Text>
             </Box>
             <Box flexDirection="column" width={colW}>
               <Text dimColor>24H PEAK</Text>
               <Text bold color="magenta">
                 {" "}
-                {peak24h.count} @ {peak24h.label}
+                {historyDigest.peak.count} @ {historyDigest.peak.label}
               </Text>
             </Box>
             <Box flexDirection="column" width={colW}>
@@ -786,7 +835,11 @@ export default function App() {
 
           {/* Heatmap */}
           <Box marginTop={1}>
-            <HourlyHeatmap history={recentHistory} width={W} />
+            <HourlyHeatmap
+              todayMinutes={historyDigest.todayMinutes}
+              yesterdayMinutes={historyDigest.yesterdayMinutes}
+              width={W}
+            />
           </Box>
 
           {/* Session List */}
@@ -884,7 +937,7 @@ export default function App() {
         <Text dimColor>{sep}</Text>
       </Box>
       <Box justifyContent="space-between">
-        <Text dimColor>scan #{tick}</Text>
+        <Text dimColor>scan #{tick} | heap {heapMB}MB</Text>
         <Text dimColor>
           {interactive.length} sessions
           {subagents.length > 0 && ` + ${subagents.length} subagents`} |{" "}
