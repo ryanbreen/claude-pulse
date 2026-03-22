@@ -16,19 +16,22 @@ if (args.includes("--snapshot") || args.includes("-s")) {
   // Interactive TUI mode
   const { default: App } = await import("./app.js");
 
-  // Heap watchdog: exit gracefully before OOM so supervisor can restart cleanly.
-  // Also force GC periodically to prevent fragmentation from accumulating.
-  const HEAP_WATCHDOG_MB = 400;
+  // Backup heap watchdog (primary one is in the 3s refresh callback in app.tsx).
+  // This one runs on a separate 10s timer as a safety net.
+  const gcAvailable = typeof globalThis.gc === "function";
+  process.stderr.write(
+    `[pulse] Started. gc=${gcAvailable ? "yes" : "NO (--expose-gc missing?)"} pid=${process.pid}\n`
+  );
   setInterval(() => {
-    if (typeof globalThis.gc === "function") globalThis.gc();
+    if (gcAvailable) (globalThis as any).gc();
     const heapMB = process.memoryUsage().heapUsed / 1024 / 1024;
-    if (heapMB > HEAP_WATCHDOG_MB) {
+    if (heapMB > 350) {
       process.stderr.write(
-        `[claude-pulse] Heap watchdog: ${Math.round(heapMB)}MB > ${HEAP_WATCHDOG_MB}MB limit. Restarting.\n`
+        `[pulse] Backup watchdog: ${Math.round(heapMB)}MB > 350MB. Exiting.\n`
       );
       process.exit(1);
     }
-  }, 30_000);
+  }, 10_000);
 
   const hasStdin =
     process.stdin.isTTY === true &&

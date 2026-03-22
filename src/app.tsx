@@ -25,6 +25,12 @@ import { updateCompletedSessions, getCompletedQueue } from "./state.js";
 const SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
 const HEAT = ["\u00b7", "\u2591", "\u2592", "\u2593", "\u2588"];
 
+// Memory safety constants — checked every 3s INSIDE the refresh callback
+// (not a separate timer that can be starved by the event loop).
+const HEAP_LIMIT_MB = 300;
+const MAX_LIFETIME_MS = 2 * 60 * 60 * 1000; // 2 hours
+const PROCESS_START = Date.now();
+
 type TabMode = "live" | "history";
 
 // Pre-computed digest replaces storing thousands of HistoryEntry objects in
@@ -560,6 +566,32 @@ export default function App() {
 
   useEffect(() => {
     const refresh = () => {
+      // === Memory guard: runs every 3s BEFORE any allocation or render ===
+      const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+
+      // Log heap every ~3 min for diagnosis
+      if (tickRef.current > 0 && tickRef.current % 60 === 0) {
+        process.stderr.write(
+          `[pulse] tick=${tickRef.current} heap=${heapMB}MB\n`
+        );
+      }
+
+      // Exit before OOM — supervisor restarts in 2s
+      if (heapMB > HEAP_LIMIT_MB) {
+        process.stderr.write(
+          `[pulse] Heap ${heapMB}MB > ${HEAP_LIMIT_MB}MB limit. Exiting for restart.\n`
+        );
+        process.exit(1);
+      }
+
+      // Max lifetime: restart every 2h to reclaim any leaked memory
+      if (Date.now() - PROCESS_START > MAX_LIFETIME_MS) {
+        process.stderr.write(
+          `[pulse] Max lifetime (2h) reached. Exiting for restart.\n`
+        );
+        process.exit(1);
+      }
+
       const currentSessions = getActiveSessions();
       updateCompletedSessions(currentSessions);
 
