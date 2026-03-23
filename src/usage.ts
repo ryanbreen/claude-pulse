@@ -6,30 +6,39 @@ import {
   readSync,
   closeSync,
 } from "fs";
+import { execSync } from "child_process";
 import { homedir } from "os";
 import { join } from "path";
 
 export interface UsageInfo {
+  // Claude usage
   fiveHourTokens: number;
   weeklyTokens: number;
   fiveHourPct: number;
   weeklyPct: number;
   fiveHourResetMs: number;
   weeklyResetMs: number;
+  // Codex usage
+  codexWeeklyTokens: number;
+  codexWeeklyPct: number;
+  // User identity
+  claudeEmail: string | null;
 }
 
-// Configurable via env vars. Set to 0 to disable that limit display.
-// Read lazily so env vars can be set after import (e.g., .env loading).
+// Configurable via env vars. Set to 0 to disable.
 function getFiveHourLimit(): number {
   return parseInt(process.env.CLAUDE_PULSE_5H_LIMIT ?? "0", 10);
 }
 function getWeeklyLimit(): number {
   return parseInt(process.env.CLAUDE_PULSE_WEEKLY_LIMIT ?? "0", 10);
 }
+function getCodexWeeklyLimit(): number {
+  return parseInt(process.env.CLAUDE_PULSE_CODEX_WEEKLY_LIMIT ?? "0", 10);
+}
 
 interface TokenEntry {
   ts: number;
-  tokens: number; // input + cache_creation + output (what counts toward limits)
+  tokens: number;
 }
 
 // Cache per JSONL file: only re-read when mtime changes
@@ -38,15 +47,65 @@ const fileCache = new Map<
   { mtimeMs: number; entries: TokenEntry[] }
 >();
 
-// Oldest timestamp we care about for cache eviction
 let oldestRelevant = 0;
 
+// Claude auth email — cached since it rarely changes
+let cachedEmail: string | null | undefined = undefined;
+let emailFetchedAt = 0;
+const EMAIL_CACHE_MS = 5 * 60_000; // re-check every 5 min
+
+function getClaudeEmail(): string | null {
+  const now = Date.now();
+  if (cachedEmail !== undefined && now - emailFetchedAt < EMAIL_CACHE_MS) {
+    return cachedEmail;
+  }
+  try {
+    const output = execSync("claude auth status 2>/dev/null", {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    const match = output.match(/"email"\s*:\s*"([^"]+)"/);
+    cachedEmail = match ? match[1] : null;
+  } catch {
+    cachedEmail = null;
+  }
+  emailFetchedAt = now;
+  return cachedEmail;
+}
+
+// Codex usage from SQLite — cached by db mtime
+let codexCache: { mtimeMs: number; weeklyTokens: number } | null = null;
+
+function getCodexWeeklyTokens(): number {
+  const dbPath = join(homedir(), ".codex", "state_5.sqlite");
+  if (!existsSync(dbPath)) return 0;
+
+  try {
+    const stat = statSync(dbPath);
+    if (codexCache && codexCache.mtimeMs === stat.mtimeMs) {
+      return codexCache.weeklyTokens;
+    }
+
+    const output = execSync(
+      `sqlite3 "${dbPath}" "SELECT COALESCE(SUM(tokens_used),0) FROM threads WHERE created_at > unixepoch('now', '-7 days')"`,
+      { encoding: "utf-8", timeout: 3000 }
+    );
+    const tokens = parseInt(output.trim(), 10) || 0;
+    codexCache = { mtimeMs: stat.mtimeMs, weeklyTokens: tokens };
+    return tokens;
+  } catch {
+    return 0;
+  }
+}
+
 export function getUsageInfo(): UsageInfo | null {
-  if (!getFiveHourLimit() && !getWeeklyLimit()) return null;
+  const has5h = getFiveHourLimit() > 0;
+  const hasWeekly = getWeeklyLimit() > 0;
+  const hasCodex = getCodexWeeklyLimit() > 0;
+
+  if (!has5h && !hasWeekly && !hasCodex) return null;
 
   const projectsDir = join(homedir(), ".claude", "projects");
-  if (!existsSync(projectsDir)) return null;
-
   const now = Date.now();
   const fiveHoursAgo = now - 5 * 3600_000;
   const weekAgo = now - 7 * 24 * 3600_000;
@@ -56,56 +115,56 @@ export function getUsageInfo(): UsageInfo | null {
   let weeklyTokens = 0;
   let earliestFiveHour = now;
 
-  try {
-    const projects = readdirSync(projectsDir);
-    for (const proj of projects) {
-      const projPath = join(projectsDir, proj);
-      let files: string[];
-      try {
-        files = readdirSync(projPath).filter((f) => f.endsWith(".jsonl"));
-      } catch {
-        continue;
-      }
-
-      for (const f of files) {
-        const fpath = join(projPath, f);
-        let stat;
+  if ((has5h || hasWeekly) && existsSync(projectsDir)) {
+    try {
+      const projects = readdirSync(projectsDir);
+      for (const proj of projects) {
+        const projPath = join(projectsDir, proj);
+        let files: string[];
         try {
-          stat = statSync(fpath);
+          files = readdirSync(projPath).filter((f) => f.endsWith(".jsonl"));
         } catch {
           continue;
         }
 
-        // Skip files not modified in the relevant window
-        if (stat.mtimeMs < weekAgo) continue;
+        for (const f of files) {
+          const fpath = join(projPath, f);
+          let stat;
+          try {
+            stat = statSync(fpath);
+          } catch {
+            continue;
+          }
 
-        // Check cache
-        const cached = fileCache.get(fpath);
-        let entries: TokenEntry[];
+          if (stat.mtimeMs < weekAgo) continue;
 
-        if (cached && cached.mtimeMs === stat.mtimeMs) {
-          entries = cached.entries;
-        } else {
-          entries = extractTokens(fpath, stat.size);
-          fileCache.set(fpath, { mtimeMs: stat.mtimeMs, entries });
-        }
+          const cached = fileCache.get(fpath);
+          let entries: TokenEntry[];
 
-        for (const e of entries) {
-          if (e.ts >= weekAgo) {
-            weeklyTokens += e.tokens;
-            if (e.ts >= fiveHoursAgo) {
-              fiveHourTokens += e.tokens;
-              if (e.ts < earliestFiveHour) earliestFiveHour = e.ts;
+          if (cached && cached.mtimeMs === stat.mtimeMs) {
+            entries = cached.entries;
+          } else {
+            entries = extractTokens(fpath, stat.size);
+            fileCache.set(fpath, { mtimeMs: stat.mtimeMs, entries });
+          }
+
+          for (const e of entries) {
+            if (e.ts >= weekAgo) {
+              weeklyTokens += e.tokens;
+              if (e.ts >= fiveHoursAgo) {
+                fiveHourTokens += e.tokens;
+                if (e.ts < earliestFiveHour) earliestFiveHour = e.ts;
+              }
             }
           }
         }
       }
+    } catch {
+      // continue with zeros
     }
-  } catch {
-    return null;
   }
 
-  // Prune stale cache entries periodically
+  // Prune stale cache entries
   if (fileCache.size > 500) {
     for (const [k, v] of fileCache) {
       if (v.entries.length === 0 || v.entries[v.entries.length - 1].ts < weekAgo) {
@@ -114,25 +173,38 @@ export function getUsageInfo(): UsageInfo | null {
     }
   }
 
-  // 5-hour rolling window: oldest entry falls off at its ts + 5h
   const fiveHourResetMs = earliestFiveHour < now
     ? earliestFiveHour + 5 * 3600_000
     : now + 5 * 3600_000;
-
-  // Weekly: 7 days from now (rolling)
   const weeklyResetMs = now + 7 * 24 * 3600_000;
+
+  // Codex
+  const codexWeeklyTokens = hasCodex ? getCodexWeeklyTokens() : 0;
+
+  // Only fetch email when any limit is approaching 80%
+  const fiveHourPct = has5h
+    ? Math.min(Math.round((fiveHourTokens / getFiveHourLimit()) * 100), 100)
+    : 0;
+  const weeklyPct = hasWeekly
+    ? Math.min(Math.round((weeklyTokens / getWeeklyLimit()) * 100), 100)
+    : 0;
+  const codexWeeklyPct = hasCodex
+    ? Math.min(Math.round((codexWeeklyTokens / getCodexWeeklyLimit()) * 100), 100)
+    : 0;
+
+  const anyApproaching = fiveHourPct >= 80 || weeklyPct >= 80 || codexWeeklyPct >= 80;
+  const claudeEmail = anyApproaching ? getClaudeEmail() : null;
 
   return {
     fiveHourTokens,
     weeklyTokens,
-    fiveHourPct: getFiveHourLimit()
-      ? Math.min(Math.round((fiveHourTokens / getFiveHourLimit()) * 100), 100)
-      : 0,
-    weeklyPct: getWeeklyLimit()
-      ? Math.min(Math.round((weeklyTokens / getWeeklyLimit()) * 100), 100)
-      : 0,
+    fiveHourPct,
+    weeklyPct,
     fiveHourResetMs,
     weeklyResetMs,
+    codexWeeklyTokens,
+    codexWeeklyPct,
+    claudeEmail,
   };
 }
 
@@ -140,7 +212,6 @@ function extractTokens(path: string, fileSize: number): TokenEntry[] {
   const entries: TokenEntry[] = [];
 
   try {
-    // Read up to 1MB tail — covers several days of typical session activity
     const readSize = Math.min(fileSize, 1024 * 1024);
     const fd = openSync(path, "r");
     const buffer = Buffer.alloc(readSize);
@@ -149,13 +220,10 @@ function extractTokens(path: string, fileSize: number): TokenEntry[] {
 
     const content = buffer.toString("utf-8");
 
-    // Only process assistant-type entries that have output_tokens > 0
-    // (these are the actual API calls, not streaming progress chunks)
     for (const line of content.split("\n")) {
       if (!line.includes('"type":"assistant"')) continue;
       if (!line.includes('"output_tokens"')) continue;
 
-      // Use regex extraction to avoid JSON.parse on potentially huge lines
       const tsMatch = line.match(/"timestamp":"([^"]+)"/);
       if (!tsMatch) continue;
       const ts = new Date(tsMatch[1]).getTime();
@@ -169,7 +237,6 @@ function extractTokens(path: string, fileSize: number): TokenEntry[] {
 
       if (!outputMatch) continue;
       const output = parseInt(outputMatch[1], 10);
-      // Skip streaming progress entries (output_tokens <= 1)
       if (output <= 1) continue;
 
       const input = (inputMatch ? parseInt(inputMatch[1], 10) : 0) +

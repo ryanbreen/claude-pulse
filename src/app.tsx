@@ -266,8 +266,13 @@ function buildLiveView(p: {
       const c = u.weeklyPct >= 95 ? A.red : A.yel;
       warnings.push(`${c}${A.B}wk:${u.weeklyPct}%${A.R}${A.D} ${resetD}d${resetH}h${A.R}`);
     }
+    if (u.codexWeeklyPct >= 80) {
+      const c = u.codexWeeklyPct >= 95 ? A.red : A.yel;
+      warnings.push(`${c}${A.B}codex:${u.codexWeeklyPct}%${A.R}`);
+    }
     if (warnings.length > 0) {
-      usageStr = ` \u26a0 ${warnings.join(" ")} `;
+      const emailTag = u.claudeEmail ? `${A.D}${u.claudeEmail}${A.R} ` : "";
+      usageStr = ` \u26a0 ${emailTag}${warnings.join(" ")} `;
     }
   }
 
