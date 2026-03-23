@@ -1,4 +1,5 @@
 node_modules/
+*.heapsnapshot
 dist/
 worker/.dev.vars
 .env
