@@ -288,27 +288,42 @@ function buildLiveView(p: {
   lines.push(`${tabLive}${A.D} | ${A.R}${tabHist}${A.D}  (L=live H=history q=quit)${A.R}`);
   lines.push(`${A.D}${sep}${A.R}`);
 
-  // Stats row 1
+  // Stats grid — labels on one line, values on the next, properly column-aligned
   const cpuC = p.totalCpu > 50 ? A.red : p.totalCpu > 10 ? A.yel : A.grn;
-  const totalStr = p.subagents.length > 0
-    ? `${A.B} ${p.interactive.length}${A.R}${A.D} +${p.subagents.length} sub${A.R}`
-    : `${A.B} ${p.interactive.length}${A.R}`;
-  lines.push(
-    col(`${A.D}ACTIVE${A.R}\n${A.B}${A.grn} ${p.activeSessions.length}${A.R}`, cw) +
-    col(`${A.D}IDLE${A.R}\n${A.B}${A.yel} ${p.idleSessions.length}${A.R}`, cw) +
-    col(`${A.D}TOTAL${A.R}\n${totalStr}`, cw) +
-    col(`${A.D}CPU${A.R}\n${A.B}${cpuC} ${p.totalCpu.toFixed(1)}%${A.R}`, cw) +
-    `${A.D}MEMORY${A.R}\n${A.B} ${p.totalMemGB} GB${A.R}`
-  );
-
-  // Stats row 2
+  const subStr = p.subagents.length > 0 ? `${A.D} +${p.subagents.length} sub${A.R}` : "";
   const syncC = p.lastSyncColor === "green" ? A.grn : p.lastSyncColor === "red" ? A.red : p.lastSyncColor === "yellow" ? A.yel : A.gry;
+
+  // Row 1 labels
   lines.push(
-    col(`${A.D}LONGEST${A.R}\n${A.B}${A.yel} ${formatDuration(p.longestSession)}${A.R}`, cw) +
-    col(`${A.D}24H SESSIONS${A.R}\n${A.B} ${p.historyDigest.uniqueSessionCount}${A.R}`, cw) +
-    col(`${A.D}24H PROJECTS${A.R}\n${A.B} ${p.historyDigest.uniqueProjectCount}${A.R}`, cw) +
-    col(`${A.D}24H PEAK${A.R}\n${A.B}${A.mag} ${p.historyDigest.peak.count} @ ${p.historyDigest.peak.label}${A.R}`, cw) +
-    `${A.D}LAST SYNC${A.R}\n${A.B}${syncC} ${p.lastSyncStr}${A.R}`
+    col(`${A.D}ACTIVE${A.R}`, cw) +
+    col(`${A.D}IDLE${A.R}`, cw) +
+    col(`${A.D}TOTAL${A.R}`, cw) +
+    col(`${A.D}CPU${A.R}`, cw) +
+    `${A.D}MEMORY${A.R}`
+  );
+  // Row 1 values
+  lines.push(
+    col(`${A.B}${A.grn} ${p.activeSessions.length}${A.R}`, cw) +
+    col(`${A.B}${A.yel} ${p.idleSessions.length}${A.R}`, cw) +
+    col(`${A.B} ${p.interactive.length}${A.R}${subStr}`, cw) +
+    col(`${A.B}${cpuC} ${p.totalCpu.toFixed(1)}%${A.R}`, cw) +
+    `${A.B} ${p.totalMemGB} GB${A.R}`
+  );
+  // Row 2 labels
+  lines.push(
+    col(`${A.D}LONGEST${A.R}`, cw) +
+    col(`${A.D}24H SESSIONS${A.R}`, cw) +
+    col(`${A.D}24H PROJECTS${A.R}`, cw) +
+    col(`${A.D}24H PEAK${A.R}`, cw) +
+    `${A.D}LAST SYNC${A.R}`
+  );
+  // Row 2 values
+  lines.push(
+    col(`${A.B}${A.yel} ${formatDuration(p.longestSession)}${A.R}`, cw) +
+    col(`${A.B} ${p.historyDigest.uniqueSessionCount}${A.R}`, cw) +
+    col(`${A.B} ${p.historyDigest.uniqueProjectCount}${A.R}`, cw) +
+    col(`${A.B}${A.mag} ${p.historyDigest.peak.count} @ ${p.historyDigest.peak.label}${A.R}`, cw) +
+    `${A.B}${syncC} ${p.lastSyncStr}${A.R}`
   );
 
   // Sparklines
