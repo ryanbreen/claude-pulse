@@ -28,8 +28,10 @@ crash_times=()
 
 while true; do
   set +e
-  # Run node directly (not via npm) so stdin/TTY passes through for keyboard input.
-  node dist/index.js "$@" 2>>"$CRASH_LOG"
+  # Use `script` to allocate a pseudo-TTY so Ink gets raw mode for keyboard input.
+  # Bash scripts don't pass stdin as a TTY to child processes otherwise.
+  # stderr redirect goes inside the command so heap watchdog logs are captured.
+  script -q /dev/null bash -c "node dist/index.js $* 2>>\"$CRASH_LOG\""
   exit_code=$?
   set -e
 
