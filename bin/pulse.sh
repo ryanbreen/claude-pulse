@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-restart supervisor for claude-pulse TUI.
 # Restarts on crash (OOM, signals) but exits cleanly on user quit (exit 0).
-# Logs each crash to ~/Downloads/claude-pulse-crashes.log for diagnosis.
+# Logs each restart/crash to ~/Downloads/claude-pulse-crashes.log.
 
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -11,13 +11,21 @@ RESTART_DELAY=2
 MAX_RAPID_CRASHES=5
 RAPID_WINDOW=60  # seconds
 
+# Load .env if it exists
+if [ -f .env ]; then
+  set -a
+  source .env
+  set +a
+fi
+
+export NODE_OPTIONS="--expose-gc --max-old-space-size=512"
+
 crash_times=()
 
 while true; do
   set +e
-  # Use compiled version (npm run start) for stability.
-  # stderr goes to crash log so heap watchdog messages are captured.
-  npm run start -- "$@" 2>>"$CRASH_LOG"
+  # Run node directly (not via npm) so stdin/TTY passes through for keyboard input.
+  node dist/index.js "$@" 2>>"$CRASH_LOG"
   exit_code=$?
   set -e
 
@@ -29,7 +37,6 @@ while true; do
   now=$(date +%s)
   crash_times+=("$now")
 
-  # Log the crash
   echo "[$(date -Iseconds)] claude-pulse exited with code ${exit_code}" >> "$CRASH_LOG"
 
   # Count crashes within the rapid window
