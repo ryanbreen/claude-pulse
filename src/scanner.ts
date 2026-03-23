@@ -86,7 +86,7 @@ function detectTurnState(cwd: string, sessionId?: string): TurnState {
   const projectsDir = join(home, ".claude", "projects");
 
   // Convert CWD to the project directory name Claude uses:
-  // /Users/wrb/fun/code/claude-pulse → -Users-wrb-fun-code-claude-pulse
+  // /Users/foo/code/my-project → -Users-foo-code-my-project
   const projectDirName = cwd.replace(/\//g, "-");
   const projectPath = join(projectsDir, projectDirName);
 

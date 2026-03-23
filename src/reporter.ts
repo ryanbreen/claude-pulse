@@ -1,8 +1,7 @@
 import { getActiveSessions, ACTIVE_CPU_THRESHOLD, type ClaudeSession } from "./scanner.js";
 
 const API_URL =
-  process.env.CLAUDE_PULSE_API_URL ??
-  "https://claude-pulse-api.porivo.workers.dev";
+  process.env.CLAUDE_PULSE_API_URL ?? "";
 const API_KEY = process.env.CLAUDE_PULSE_API_KEY ?? "";
 
 export interface ReportStatus {

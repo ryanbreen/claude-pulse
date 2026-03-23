@@ -22,14 +22,14 @@ Working ██████░░░░░░░░░░░░░░░░░░
   PID    TTY    UPTIME    CPU    MEM    MODE     DIRECTORY
 ⚡16424  s047   2h 39m    28.8%  997M   new      ~/fun/code/claude_pulse
 ⚡23147  s048   24h 38m   13.1%  1049M  continue ~/fun/code/breenix
-○ 87695  s002   14h 12m   0.0%   779M   resume   ~/getfastr/code/penpot
+○ 87695  s002   14h 12m   0.0%   779M   resume   ~/code/my-project
 ...
 ```
 
 ## Install & Run
 
 ```bash
-git clone https://github.com/ryanbreen/claude-pulse.git
+git clone https://github.com/your-username/claude-pulse.git
 cd claude-pulse
 npm install
 npm run dev

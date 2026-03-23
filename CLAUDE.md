@@ -19,10 +19,10 @@ A TUI dashboard for monitoring active Claude Code sessions across the system. Bu
 
 ## Cloudflare / Wrangler
 
-The Cloudflare API token for the personal account (ryan@ryanbreen.com) is in `../envrc`. Since Claude Code shells don't run direnv hooks, source it before wrangler commands:
+The Cloudflare API token is in `../envrc`. Since Claude Code shells don't run direnv hooks, source it before wrangler commands:
 
 ```
-source /Users/wrb/fun/code/.envrc && npx wrangler ...
+source ../.envrc && npx wrangler ...
 ```
 
 ## Key Design Decisions
