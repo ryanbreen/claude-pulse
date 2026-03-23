@@ -114,41 +114,6 @@ function spark(data: number[], width: number): string {
     .join("");
 }
 
-function Gauge({
-  value,
-  max,
-  width,
-  label,
-}: {
-  value: number;
-  max: number;
-  width: number;
-  label: string;
-}) {
-  const labelStr = `${label} `;
-  const suffixStr = ` ${value}/${max}`;
-  const barWidth = Math.max(width - labelStr.length - suffixStr.length, 10);
-  const filled = Math.round((value / Math.max(max, 1)) * barWidth);
-  const bar =
-    "\u2588".repeat(Math.min(filled, barWidth)) +
-    "\u2591".repeat(Math.max(barWidth - filled, 0));
-  const color =
-    value === 0
-      ? "gray"
-      : value <= max * 0.3
-        ? "green"
-        : value <= max * 0.7
-          ? "yellow"
-          : "red";
-  return (
-    <Text>
-      <Text dimColor>{labelStr}</Text>
-      <Text color={color}>{bar}</Text>
-      <Text dimColor>{suffixStr}</Text>
-    </Text>
-  );
-}
-
 // Build heatmap as a single ANSI string — replaces ~200 React elements
 function buildHeatmap(todayMinutes: number[], yesterdayMinutes: number[], width: number): string {
   const labelWidth = 6;
@@ -243,34 +208,106 @@ function buildSessionTable(sessions: ClaudeSession[], dirWidth: number): string 
   return lines.join("\n");
 }
 
+// Build gauge bar as ANSI string
+function buildGauge(value: number, max: number, width: number, label: string): string {
+  const labelStr = `${label} `;
+  const suffixStr = ` ${value}/${max}`;
+  const barWidth = Math.max(width - labelStr.length - suffixStr.length, 10);
+  const filled = Math.round((value / Math.max(max, 1)) * barWidth);
+  const bar = "\u2588".repeat(Math.min(filled, barWidth)) + "\u2591".repeat(Math.max(barWidth - filled, 0));
+  const c = value === 0 ? A.gry : value <= max * 0.3 ? A.grn : value <= max * 0.7 ? A.yel : A.red;
+  return `${A.D}${labelStr}${A.R}${c}${bar}${A.R}${A.D}${suffixStr}${A.R}`;
+}
+
+// Pad a string to a fixed column width, using ANSI-aware logic
+function col(text: string, width: number): string {
+  // Strip ANSI for length measurement
+  const visible = text.replace(/\x1b\[[0-9;]*m/g, "");
+  const pad = Math.max(width - visible.length, 0);
+  return text + " ".repeat(pad);
+}
+
+// Build the entire live tab as a single ANSI string — ONE React element
+function buildLiveView(p: {
+  W: number; colW: number; sep: string; sparkWidth: number;
+  activeSessions: ClaudeSession[]; idleSessions: ClaudeSession[];
+  interactive: ClaudeSession[]; subagents: ClaudeSession[];
+  totalCpu: number; totalMemGB: string; longestSession: number;
+  historyDigest: HistoryDigest;
+  lastSyncStr: string; lastSyncColor: string;
+  countData: number[]; cpuData: number[]; peakSessions: number;
+  sessions: ClaudeSession[]; dirWidth: number;
+  tick: number; heapMB: number;
+  projectGroups: Map<string, ClaudeSession[]>;
+}): string {
+  const lines: string[] = [];
+  const { W, colW: cw, sep, sparkWidth } = p;
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString();
+
+  // Header
+  lines.push(`${A.B}${A.cyn}CLAUDE PULSE${A.R}${" ".repeat(Math.max(W - 12 - timeStr.length - 14, 1))}${A.D}${timeStr} | 3s refresh${A.R}`);
+
+  // Tab bar
+  const tabLive = `${A.B}${A.cyn} \u25b6 LIVE ${A.R}`;
+  const tabHist = `${A.gry}   HISTORY ${A.R}`;
+  lines.push(`${tabLive}${A.D} | ${A.R}${tabHist}${A.D}  (L=live H=history q=quit)${A.R}`);
+  lines.push(`${A.D}${sep}${A.R}`);
+
+  // Stats row 1
+  const cpuC = p.totalCpu > 50 ? A.red : p.totalCpu > 10 ? A.yel : A.grn;
+  const totalStr = p.subagents.length > 0
+    ? `${A.B} ${p.interactive.length}${A.R}${A.D} +${p.subagents.length} sub${A.R}`
+    : `${A.B} ${p.interactive.length}${A.R}`;
+  lines.push(
+    col(`${A.D}ACTIVE${A.R}\n${A.B}${A.grn} ${p.activeSessions.length}${A.R}`, cw) +
+    col(`${A.D}IDLE${A.R}\n${A.B}${A.yel} ${p.idleSessions.length}${A.R}`, cw) +
+    col(`${A.D}TOTAL${A.R}\n${totalStr}`, cw) +
+    col(`${A.D}CPU${A.R}\n${A.B}${cpuC} ${p.totalCpu.toFixed(1)}%${A.R}`, cw) +
+    `${A.D}MEMORY${A.R}\n${A.B} ${p.totalMemGB} GB${A.R}`
+  );
+
+  // Stats row 2
+  const syncC = p.lastSyncColor === "green" ? A.grn : p.lastSyncColor === "red" ? A.red : p.lastSyncColor === "yellow" ? A.yel : A.gry;
+  lines.push(
+    col(`${A.D}LONGEST${A.R}\n${A.B}${A.yel} ${formatDuration(p.longestSession)}${A.R}`, cw) +
+    col(`${A.D}24H SESSIONS${A.R}\n${A.B} ${p.historyDigest.uniqueSessionCount}${A.R}`, cw) +
+    col(`${A.D}24H PROJECTS${A.R}\n${A.B} ${p.historyDigest.uniqueProjectCount}${A.R}`, cw) +
+    col(`${A.D}24H PEAK${A.R}\n${A.B}${A.mag} ${p.historyDigest.peak.count} @ ${p.historyDigest.peak.label}${A.R}`, cw) +
+    `${A.D}LAST SYNC${A.R}\n${A.B}${syncC} ${p.lastSyncStr}${A.R}`
+  );
+
+  // Sparklines
+  lines.push(`${A.D}${sep}${A.R}`);
+  lines.push(`${A.D}SESSIONS${A.R}`);
+  lines.push(`${A.cyn}${spark(p.countData, sparkWidth)}${A.R}${A.D} peak ${p.peakSessions}${A.R}`);
+  lines.push(`${A.D}CPU LOAD${A.R}`);
+  lines.push(`${A.red}${spark(p.cpuData, sparkWidth)}${A.R}${A.D} peak ${Math.max(...p.cpuData, 0).toFixed(0)}%${A.R}`);
+  lines.push(buildGauge(p.activeSessions.length, Math.max(p.sessions.length, 1), W, "Working"));
+
+  // Heatmap
+  lines.push(buildHeatmap(p.historyDigest.todayMinutes, p.historyDigest.yesterdayMinutes, W));
+
+  // Session table
+  lines.push(`${A.D}${sep}${A.R}`);
+  lines.push(buildSessionTable(p.sessions, p.dirWidth));
+
+  // Footer
+  lines.push(`${A.D}${sep}${A.R}`);
+  const footerLeft = `scan #${p.tick} | heap ${p.heapMB}MB`;
+  const footerRight = `${p.interactive.length} sessions` +
+    (p.subagents.length > 0 ? ` + ${p.subagents.length} subagents` : "") +
+    ` | ${p.projectGroups.size} projects | ${p.totalMemGB} GB`;
+  const footerPad = Math.max(W - footerLeft.length - footerRight.length, 1);
+  lines.push(`${A.D}${footerLeft}${" ".repeat(footerPad)}${footerRight}${A.R}`);
+
+  return lines.join("\n");
+}
+
 interface HistoryPoint {
   timestamp: number;
   count: number;
   activeCpu: number;
-}
-
-function TabBar({ mode, W }: { mode: TabMode; W: number }) {
-  const sep = "\u2500".repeat(W);
-  return (
-    <Box flexDirection="column">
-      <Box>
-        <Text bold={mode === "live"} color={mode === "live" ? "cyan" : "gray"}>
-          {mode === "live" ? " \u25b6 LIVE " : "   LIVE "}
-        </Text>
-        <Text dimColor> | </Text>
-        <Text
-          bold={mode === "history"}
-          color={mode === "history" ? "magenta" : "gray"}
-        >
-          {mode === "history" ? " \u25b6 HISTORY " : "   HISTORY "}
-        </Text>
-        <Text dimColor>
-          {"  "}(L=live H=history q=quit)
-        </Text>
-      </Box>
-      <Text dimColor>{sep}</Text>
-    </Box>
-  );
 }
 
 function HistoryView({
@@ -763,151 +800,26 @@ export default function App() {
     lastSyncColor = "gray";
   }
 
-  // Heap size for footer display
   const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
 
+  // Build the entire live view as a single ANSI string.
+  // Ink leaks ~140 bytes per React element per render. By rendering
+  // the whole view as one <Text>, the leak rate drops to near zero.
+  const liveView = buildLiveView({
+    W, colW, sep, sparkWidth,
+    activeSessions, idleSessions, interactive, subagents,
+    totalCpu, totalMemGB, longestSession,
+    historyDigest, lastSyncStr, lastSyncColor,
+    countData, cpuData, peakSessions,
+    sessions, dirWidth, tick, heapMB, projectGroups,
+  });
+
+  // Minimal React tree: Box > Text (header) + Text (content) + Text (for history tab)
+  // Total elements: ~5 for live tab, ~70 for history tab (only when active)
   return (
     <Box flexDirection="column" paddingX={1}>
-      {/* Header */}
-      <Box justifyContent="space-between">
-        <Text bold color="cyan">
-          CLAUDE PULSE
-        </Text>
-        <Text dimColor>{timeStr} | 3s refresh</Text>
-      </Box>
-
-      {/* Tab Bar */}
-      <Box marginTop={1}>
-        <TabBar mode={mode} W={W} />
-      </Box>
-
       {mode === "live" ? (
-        <>
-          {/* Stats Grid - 5 columns, aligned across both rows */}
-          <Box marginTop={1}>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>ACTIVE</Text>
-              <Text bold color="green">
-                {" "}
-                {activeSessions.length}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>IDLE</Text>
-              <Text bold color="yellow">
-                {" "}
-                {idleSessions.length}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>TOTAL</Text>
-              <Text bold>
-                {" "}
-                {interactive.length}
-                {subagents.length > 0 && (
-                  <Text dimColor> +{subagents.length} sub</Text>
-                )}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>CPU</Text>
-              <Text
-                bold
-                color={
-                  totalCpu > 50 ? "red" : totalCpu > 10 ? "yellow" : "green"
-                }
-              >
-                {" "}
-                {totalCpu.toFixed(1)}%
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>MEMORY</Text>
-              <Text bold>
-                {" "}
-                {totalMemGB} GB
-              </Text>
-            </Box>
-          </Box>
-          <Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>LONGEST</Text>
-              <Text bold color="yellow">
-                {" "}
-                {formatDuration(longestSession)}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>24H SESSIONS</Text>
-              <Text bold>
-                {" "}
-                {historyDigest.uniqueSessionCount}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>24H PROJECTS</Text>
-              <Text bold>
-                {" "}
-                {historyDigest.uniqueProjectCount}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>24H PEAK</Text>
-              <Text bold color="magenta">
-                {" "}
-                {historyDigest.peak.count} @ {historyDigest.peak.label}
-              </Text>
-            </Box>
-            <Box flexDirection="column" width={colW}>
-              <Text dimColor>LAST SYNC</Text>
-              <Text bold color={lastSyncColor as any}>
-                {" "}
-                {lastSyncStr}
-              </Text>
-            </Box>
-          </Box>
-
-          {/* Charts */}
-          <Box marginTop={1}>
-            <Text dimColor>{sep}</Text>
-          </Box>
-
-          <Box marginTop={1} flexDirection="column">
-            <Text dimColor>SESSIONS</Text>
-            <Text color="cyan" wrap="truncate">
-              {spark(countData, sparkWidth)}
-              <Text dimColor> peak {peakSessions}</Text>
-            </Text>
-
-            <Text dimColor>CPU LOAD</Text>
-            <Text color="red" wrap="truncate">
-              {spark(cpuData, sparkWidth)}
-              <Text dimColor>
-                {" "}
-                peak {Math.max(...cpuData, 0).toFixed(0)}%
-              </Text>
-            </Text>
-
-            <Gauge
-              value={activeSessions.length}
-              max={Math.max(sessions.length, 1)}
-              width={W}
-              label="Working"
-            />
-          </Box>
-
-          {/* Heatmap — single ANSI string, no per-cell React elements */}
-          <Box marginTop={1}>
-            <Text>{buildHeatmap(historyDigest.todayMinutes, historyDigest.yesterdayMinutes, W)}</Text>
-          </Box>
-
-          {/* Session List — single ANSI string, no per-row React elements */}
-          <Box marginTop={1}>
-            <Text dimColor>{sep}</Text>
-          </Box>
-
-          <Text>{buildSessionTable(sessions, dirWidth)}</Text>
-        </>
+        <Text>{liveView}</Text>
       ) : (
         <HistoryView
           W={W}
@@ -916,19 +828,6 @@ export default function App() {
           loading={historyLoading}
         />
       )}
-
-      {/* Footer */}
-      <Box marginTop={1}>
-        <Text dimColor>{sep}</Text>
-      </Box>
-      <Box justifyContent="space-between">
-        <Text dimColor>scan #{tick} | heap {heapMB}MB</Text>
-        <Text dimColor>
-          {interactive.length} sessions
-          {subagents.length > 0 && ` + ${subagents.length} subagents`} |{" "}
-          {projectGroups.size} projects | {totalMemGB} GB
-        </Text>
-      </Box>
     </Box>
   );
 }
