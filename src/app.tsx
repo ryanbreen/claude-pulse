@@ -21,6 +21,7 @@ import {
   type D1Stats,
 } from "./reporter.js";
 import { updateCompletedSessions, getCompletedQueue } from "./state.js";
+import { getUsageInfo, type UsageInfo } from "./usage.js";
 
 const SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
 const HEAT = ["\u00b7", "\u2591", "\u2592", "\u2593", "\u2588"];
@@ -239,14 +240,42 @@ function buildLiveView(p: {
   sessions: ClaudeSession[]; dirWidth: number;
   tick: number; heapMB: number;
   projectGroups: Map<string, ClaudeSession[]>;
+  usage: UsageInfo | null;
 }): string {
   const lines: string[] = [];
   const { W, colW: cw, sep, sparkWidth } = p;
   const now = new Date();
   const timeStr = now.toLocaleTimeString();
 
+  // Usage warning (only shown when >80% of any limit)
+  let usageStr = "";
+  if (p.usage) {
+    const u = p.usage;
+    const warnings: string[] = [];
+    if (u.fiveHourPct >= 80) {
+      const resetIn = Math.max(0, u.fiveHourResetMs - Date.now());
+      const resetH = Math.floor(resetIn / 3600_000);
+      const resetM = Math.floor((resetIn % 3600_000) / 60_000);
+      const c = u.fiveHourPct >= 95 ? A.red : A.yel;
+      warnings.push(`${c}${A.B}5h:${u.fiveHourPct}%${A.R}${A.D} ${resetH}h${resetM}m${A.R}`);
+    }
+    if (u.weeklyPct >= 80) {
+      const resetIn = Math.max(0, u.weeklyResetMs - Date.now());
+      const resetD = Math.floor(resetIn / 86400_000);
+      const resetH = Math.floor((resetIn % 86400_000) / 3600_000);
+      const c = u.weeklyPct >= 95 ? A.red : A.yel;
+      warnings.push(`${c}${A.B}wk:${u.weeklyPct}%${A.R}${A.D} ${resetD}d${resetH}h${A.R}`);
+    }
+    if (warnings.length > 0) {
+      usageStr = ` \u26a0 ${warnings.join(" ")} `;
+    }
+  }
+
   // Header
-  lines.push(`${A.B}${A.cyn}CLAUDE PULSE${A.R}${" ".repeat(Math.max(W - 12 - timeStr.length - 14, 1))}${A.D}${timeStr} | 3s refresh${A.R}`);
+  const rightSide = `${usageStr}${A.D}${timeStr} | 3s refresh${A.R}`;
+  const rightVisible = rightSide.replace(/\x1b\[[0-9;]*m/g, "");
+  const headerPad = Math.max(W - 12 - rightVisible.length, 1);
+  lines.push(`${A.B}${A.cyn}CLAUDE PULSE${A.R}${" ".repeat(headerPad)}${rightSide}`);
 
   // Tab bar
   const tabLive = `${A.B}${A.cyn} \u25b6 LIVE ${A.R}`;
@@ -548,6 +577,7 @@ export default function App() {
     }
   });
   const [tick, setTick] = useState(0);
+  const [usage, setUsage] = useState<UsageInfo | null>(() => getUsageInfo());
 
   // History tab state
   const [trends, setTrends] = useState<TrendBucket[]>([]);
@@ -726,6 +756,7 @@ export default function App() {
           setHistoryDigest(computeHistoryDigest(newHistory));
         }
         reportSnapshot(currentSessions);
+        setUsage(getUsageInfo());
       }
 
       setTick(currentTick);
@@ -811,7 +842,7 @@ export default function App() {
     totalCpu, totalMemGB, longestSession,
     historyDigest, lastSyncStr, lastSyncColor,
     countData, cpuData, peakSessions,
-    sessions, dirWidth, tick, heapMB, projectGroups,
+    sessions, dirWidth, tick, heapMB, projectGroups, usage,
   });
 
   // Minimal React tree: Box > Text (header) + Text (content) + Text (for history tab)
