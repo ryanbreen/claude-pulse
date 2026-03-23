@@ -31,6 +31,24 @@ const HEAP_LIMIT_MB = 300;
 const MAX_LIFETIME_MS = 2 * 60 * 60 * 1000; // 2 hours
 const PROCESS_START = Date.now();
 
+// ANSI escape codes — used to build colored strings directly instead of
+// creating hundreds of React <Text> elements per render. Ink's reconciler
+// leaks ~140 bytes per element per render cycle; with 100 sessions × 9
+// elements each, that's 2MB/min. Pre-built ANSI strings bypass this.
+const A = {
+  R: "\x1b[0m",     // reset
+  B: "\x1b[1m",     // bold
+  D: "\x1b[2m",     // dim
+  red: "\x1b[31m",
+  grn: "\x1b[32m",
+  yel: "\x1b[33m",
+  blu: "\x1b[34m",
+  mag: "\x1b[35m",
+  cyn: "\x1b[36m",
+  wht: "\x1b[37m",
+  gry: "\x1b[90m",
+} as const;
+
 type TabMode = "live" | "history";
 
 // Pre-computed digest replaces storing thousands of HistoryEntry objects in
@@ -131,20 +149,12 @@ function Gauge({
   );
 }
 
-function HourlyHeatmap({
-  todayMinutes,
-  yesterdayMinutes,
-  width,
-}: {
-  todayMinutes: number[];
-  yesterdayMinutes: number[];
-  width: number;
-}) {
-  const labelWidth = 6; // "TODAY " or "YEST "
+// Build heatmap as a single ANSI string — replaces ~200 React elements
+function buildHeatmap(todayMinutes: number[], yesterdayMinutes: number[], width: number): string {
+  const labelWidth = 6;
   const barWidth = Math.max(width - labelWidth, 24);
   const minutesPerBucket = 1440 / barWidth;
 
-  // Resample per-minute counts to display-width buckets
   const todayBuckets = new Array(barWidth).fill(0);
   const yesterdayBuckets = new Array(barWidth).fill(0);
   for (let i = 0; i < 1440; i++) {
@@ -153,12 +163,27 @@ function HourlyHeatmap({
     yesterdayBuckets[bucket] += yesterdayMinutes[i];
   }
 
-  // Use shared max so the two rows are comparable
   const max = Math.max(...todayBuckets, ...yesterdayBuckets, 1);
   const now = new Date();
-  const currentBucket = Math.floor(
-    (now.getHours() * 60 + now.getMinutes()) / minutesPerBucket
-  );
+  const curBucket = Math.floor((now.getHours() * 60 + now.getMinutes()) / minutesPerBucket);
+
+  const lines: string[] = [];
+  lines.push(`${A.D}ACTIVITY (${Math.round(minutesPerBucket)}-min buckets)${A.R}`);
+
+  let yest = `${A.D}${"YEST ".padEnd(labelWidth)}${A.R}`;
+  for (let i = 0; i < barWidth; i++) {
+    const level = Math.min(Math.floor((yesterdayBuckets[i] / max) * 4), 4);
+    yest += `${yesterdayBuckets[i] === 0 ? A.gry : A.blu}${HEAT[level]}${A.R}`;
+  }
+  lines.push(yest);
+
+  let today = `${A.D}${"TODAY ".padEnd(labelWidth)}${A.R}`;
+  for (let i = 0; i < barWidth; i++) {
+    const level = Math.min(Math.floor((todayBuckets[i] / max) * 4), 4);
+    const c = i === curBucket ? `${A.B}${A.cyn}` : todayBuckets[i] === 0 ? A.gry : A.grn;
+    today += `${c}${HEAT[level]}${A.R}`;
+  }
+  lines.push(today);
 
   const labels = new Array(barWidth).fill(" ");
   for (const h of [0, 3, 6, 9, 12, 15, 18, 21]) {
@@ -169,47 +194,53 @@ function HourlyHeatmap({
       labels[pos + 1] = lbl[1];
     }
   }
+  lines.push(`${A.D}${" ".repeat(labelWidth)}${labels.join("")}${A.R}`);
 
-  return (
-    <Box flexDirection="column">
-      <Text dimColor>
-        ACTIVITY ({Math.round(minutesPerBucket)}-min buckets)
-      </Text>
-      <Box>
-        <Text dimColor>{"YEST ".padEnd(labelWidth)}</Text>
-        {yesterdayBuckets.map((count, i) => {
-          const level = Math.min(Math.floor((count / max) * 4), 4);
-          return (
-            <Text
-              key={`yest-${i}`}
-              color={count === 0 ? "gray" : "blue"}
-            >
-              {HEAT[level]}
-            </Text>
-          );
-        })}
-      </Box>
-      <Box>
-        <Text dimColor>{"TODAY ".padEnd(labelWidth)}</Text>
-        {todayBuckets.map((count, i) => {
-          const level = Math.min(Math.floor((count / max) * 4), 4);
-          const isCurrent = i === currentBucket;
-          return (
-            <Text
-              key={`today-${i}`}
-              color={isCurrent ? "cyan" : count === 0 ? "gray" : "green"}
-              bold={isCurrent}
-            >
-              {HEAT[level]}
-            </Text>
-          );
-        })}
-      </Box>
-      <Box>
-        <Text dimColor>{" ".repeat(labelWidth)}{labels.join("")}</Text>
-      </Box>
-    </Box>
+  return lines.join("\n");
+}
+
+// Build session table as a single ANSI string — replaces ~830 React elements
+function buildSessionTable(sessions: ClaudeSession[], dirWidth: number): string {
+  const lines: string[] = [];
+
+  lines.push(
+    `${A.D}${A.B}  ${"PID".padEnd(7)}${"TTY".padEnd(7)}${"UPTIME".padEnd(10)}` +
+    `${"CPU".padEnd(7)}${"MEM".padEnd(7)}${"MODE".padEnd(9)}DIRECTORY${A.R}`
   );
+
+  for (const s of sessions) {
+    const dir = shortenPath(s.cwd, dirWidth);
+    const mode = s.isSubagent ? "subagent" : s.flags.join(",") || "new";
+    const uptime = formatDuration(s.elapsedSeconds);
+    const cpu = s.cpuPercent.toFixed(1);
+
+    const isWorking = s.turnState === "working" ||
+      (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD);
+
+    const dotC = isWorking ? (s.cpuPercent > 10 ? A.grn : A.yel) : A.gry;
+    const dot = isWorking ? (s.cpuPercent > 10 ? "\u26a1" : "\u25cf ") : "\u25cb ";
+    const uptC = s.elapsedSeconds > 43200 ? A.red : s.elapsedSeconds > 3600 ? A.yel : A.wht;
+    const cpuC = s.cpuPercent > 10 ? A.grn : s.cpuPercent > 1 ? A.yel : A.gry;
+    const modC = s.isSubagent ? A.gry :
+      s.flags.includes("resume") ? A.blu :
+      s.flags.includes("continue") ? A.cyn : A.wht;
+
+    lines.push(
+      `${dotC}${dot}${A.R}${String(s.pid).padEnd(7)}` +
+      `${A.gry}${s.tty.replace("ttys", "s").padEnd(7)}${A.R}` +
+      `${uptC}${uptime.padEnd(10)}${A.R}` +
+      `${cpuC}${(cpu + "%").padEnd(7)}${A.R}` +
+      `${A.gry}${(s.rssMB + "M").padEnd(7)}${A.R}` +
+      `${modC}${mode.padEnd(9)}${A.R}` +
+      `${A.blu}${dir}${A.R}`
+    );
+  }
+
+  if (sessions.length === 0) {
+    lines.push(`${A.D}  No active Claude sessions detected${A.R}`);
+  }
+
+  return lines.join("\n");
 }
 
 interface HistoryPoint {
@@ -865,95 +896,17 @@ export default function App() {
             />
           </Box>
 
-          {/* Heatmap */}
+          {/* Heatmap — single ANSI string, no per-cell React elements */}
           <Box marginTop={1}>
-            <HourlyHeatmap
-              todayMinutes={historyDigest.todayMinutes}
-              yesterdayMinutes={historyDigest.yesterdayMinutes}
-              width={W}
-            />
+            <Text>{buildHeatmap(historyDigest.todayMinutes, historyDigest.yesterdayMinutes, W)}</Text>
           </Box>
 
-          {/* Session List */}
+          {/* Session List — single ANSI string, no per-row React elements */}
           <Box marginTop={1}>
             <Text dimColor>{sep}</Text>
           </Box>
 
-          <Box flexDirection="column">
-            <Text dimColor bold wrap="truncate">
-              {"  "}
-              {"PID".padEnd(7)}
-              {"TTY".padEnd(7)}
-              {"UPTIME".padEnd(10)}
-              {"CPU".padEnd(7)}
-              {"MEM".padEnd(7)}
-              {"MODE".padEnd(9)}
-              {"DIRECTORY"}
-            </Text>
-
-            {sessions.map((s) => {
-              const dir = shortenPath(s.cwd, dirWidth);
-              const sessionMode = s.isSubagent
-                ? "subagent"
-                : s.flags.join(",") || "new";
-              const uptime = formatDuration(s.elapsedSeconds);
-              const cpu = s.cpuPercent.toFixed(1);
-              const uptimeColor =
-                s.elapsedSeconds > 43200
-                  ? "red"
-                  : s.elapsedSeconds > 3600
-                    ? "yellow"
-                    : ("white" as const);
-              const cpuColor =
-                s.cpuPercent > 10
-                  ? "green"
-                  : s.cpuPercent > 1
-                    ? "yellow"
-                    : ("gray" as const);
-              const modeColor = s.isSubagent
-                ? "gray"
-                : s.flags.includes("resume")
-                  ? "blue"
-                  : s.flags.includes("continue")
-                    ? "cyan"
-                    : ("white" as const);
-              const isWorking =
-                s.turnState === "working" ||
-                (s.turnState === "unknown" &&
-                  s.cpuPercent > ACTIVE_CPU_THRESHOLD);
-              const dot = isWorking
-                ? s.cpuPercent > 10
-                  ? "\u26a1"
-                  : "\u25cf "
-                : "\u25cb ";
-              const dotColor = isWorking
-                ? s.cpuPercent > 10
-                  ? "green"
-                  : "yellow"
-                : ("gray" as const);
-
-              return (
-                <Text key={`s-${s.pid}`} wrap="truncate">
-                  <Text color={dotColor}>{dot}</Text>
-                  <Text>{String(s.pid).padEnd(7)}</Text>
-                  <Text dimColor>
-                    {s.tty.replace("ttys", "s").padEnd(7)}
-                  </Text>
-                  <Text color={uptimeColor}>{uptime.padEnd(10)}</Text>
-                  <Text color={cpuColor}>{(cpu + "%").padEnd(7)}</Text>
-                  <Text dimColor>{(s.rssMB + "M").padEnd(7)}</Text>
-                  <Text color={modeColor}>{sessionMode.padEnd(9)}</Text>
-                  <Text color="blue">{dir}</Text>
-                </Text>
-              );
-            })}
-
-            {sessions.length === 0 && (
-              <Box marginTop={1} justifyContent="center">
-                <Text dimColor>No active Claude sessions detected</Text>
-              </Box>
-            )}
-          </Box>
+          <Text>{buildSessionTable(sessions, dirWidth)}</Text>
         </>
       ) : (
         <HistoryView
