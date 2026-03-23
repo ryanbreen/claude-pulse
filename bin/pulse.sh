@@ -20,6 +20,10 @@ fi
 
 export NODE_OPTIONS="--expose-gc --max-old-space-size=512"
 
+# Build before starting so we always run the latest source
+echo "[pulse] Building..." >&2
+npx tsc || { echo "[pulse] Build failed, aborting." >&2; exit 1; }
+
 crash_times=()
 
 while true; do
