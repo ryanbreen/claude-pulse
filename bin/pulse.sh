@@ -15,7 +15,9 @@ crash_times=()
 
 while true; do
   set +e
-  npm run dev -- "$@" 2>&1
+  # Use compiled version (npm run start) for stability.
+  # stderr goes to crash log so heap watchdog messages are captured.
+  npm run start -- "$@" 2>>"$CRASH_LOG"
   exit_code=$?
   set -e
 
@@ -28,7 +30,7 @@ while true; do
   crash_times+=("$now")
 
   # Log the crash
-  echo "[$(date -Iseconds)] claude-pulse crashed with exit code ${exit_code}" >> "$CRASH_LOG"
+  echo "[$(date -Iseconds)] claude-pulse exited with code ${exit_code}" >> "$CRASH_LOG"
 
   # Count crashes within the rapid window
   recent=0
@@ -43,6 +45,6 @@ while true; do
     exit 1
   fi
 
-  echo "claude-pulse crashed (exit ${exit_code}), restarting in ${RESTART_DELAY}s... (${recent}/${MAX_RAPID_CRASHES} rapid)" >&2
+  echo "claude-pulse restarting in ${RESTART_DELAY}s... (exit ${exit_code}, ${recent}/${MAX_RAPID_CRASHES} rapid)" >&2
   sleep "$RESTART_DELAY"
 done
