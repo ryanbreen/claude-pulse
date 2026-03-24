@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "NODE_OPTIONS='--expose-gc --max-old-space-size=512' tsx --env-file=.env src/index.tsx",
     "build": "tsc",
-    "start": "NODE_OPTIONS='--expose-gc --max-old-space-size=512' node dist/index.js"
+    "start": "tsc && NODE_OPTIONS='--expose-gc --max-old-space-size=512' node dist/index.js"
   },
   "keywords": ["claude", "tui", "monitoring", "ink"],
   "author": "",
