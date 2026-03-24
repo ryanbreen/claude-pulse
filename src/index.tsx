@@ -1,6 +1,6 @@
 import React from "react";
 import { render } from "ink";
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -17,10 +17,9 @@ if (args.includes("--snapshot") || args.includes("-s")) {
   const { default: App } = await import("./app.js");
 
   // Backup heap watchdog (primary one is in the 3s refresh callback in app.tsx).
-  // This one runs on a separate 10s timer as a safety net.
   const gcAvailable = typeof globalThis.gc === "function";
   process.stderr.write(
-    `[pulse] Started. gc=${gcAvailable ? "yes" : "NO (--expose-gc missing?)"} pid=${process.pid} stdin.isTTY=${process.stdin.isTTY}\n`
+    `[pulse] Started. gc=${gcAvailable ? "yes" : "NO"} pid=${process.pid} tty=${process.stdin.isTTY ?? false}\n`
   );
   setInterval(() => {
     if (gcAvailable) (globalThis as any).gc();
@@ -33,40 +32,29 @@ if (args.includes("--snapshot") || args.includes("-s")) {
     }
   }, 10_000);
 
-  const hasStdin =
-    process.stdin.isTTY === true &&
-    typeof process.stdin.setRawMode === "function";
-
   // Clear screen and move cursor to top before rendering
   process.stdout.write("\x1b[2J\x1b[H");
 
   // Launch floating badge if binary exists and --no-badge not passed
-  let badgeProc: ReturnType<typeof spawn> | null = null;
   if (!args.includes("--no-badge")) {
     const thisDir = dirname(fileURLToPath(import.meta.url));
     const badgePath = join(thisDir, "..", "bin", "claude-badge");
     if (existsSync(badgePath)) {
-      badgeProc = spawn(badgePath, [], {
+      const badgeProc = spawn(badgePath, [], {
         detached: true,
         stdio: "ignore",
       });
       badgeProc.unref();
 
-      // Kill badge when TUI exits. Only use "exit" event — registering
-      // SIGINT/SIGTERM handlers overrides Node's default behavior (exit),
-      // which was preventing Ctrl+C from actually killing the process.
       process.on("exit", () => {
-        if (badgeProc?.pid) {
-          try {
-            process.kill(badgeProc.pid);
-          } catch {}
-        }
+        try {
+          if (badgeProc.pid) process.kill(badgeProc.pid);
+        } catch {}
       });
     }
   }
 
   render(<App />, {
     exitOnCtrlC: true,
-    ...(hasStdin ? {} : { stdin: undefined }),
   });
 }
