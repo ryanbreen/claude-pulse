@@ -57,7 +57,7 @@ function loadPods(): PodEntry[] {
 
 function playCompletionSound(): void {
   try {
-    spawn("afplay", ["/System/Library/Sounds/Glass.aiff", "-v", "0.5"], {
+    spawn("afplay", ["/System/Library/Sounds/Glass.aiff", "-v", "0.75"], {
       detached: true,
       stdio: "ignore",
     }).unref();
