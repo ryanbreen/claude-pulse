@@ -1,8 +1,11 @@
-import { writeFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { execSync, spawn } from "child_process";
+import { homedir } from "os";
+import { join } from "path";
 import { ACTIVE_CPU_THRESHOLD, type ClaudeSession } from "./scanner.js";
 
 const STATE_PATH = "/tmp/claude-pulse-state.json";
+const PODS_STATE_PATH = join(homedir(), ".claude-pods", "state.json");
 
 interface YabaiWindow {
   id: number;
@@ -14,19 +17,43 @@ interface YabaiWindow {
   "has-focus": boolean;
 }
 
+interface PodEntry {
+  id: string;
+  directory: string;
+  workspace: number;
+  mode: string;
+  active: boolean;
+}
+
 interface CompletedSession {
   pid: number;
   cwd: string;
-  completedAt: number; // timestamp when it went idle
-  windowId: number | null; // yabai window id
-  windowTitle: string | null;
-  windowSpace: number | null; // yabai workspace number
+  completedAt: number;
+  workspace: number | null;
+  tabTitle: string | null;
 }
 
 // Track which sessions were previously active
 let previouslyActive = new Set<number>();
 const completedQueue: CompletedSession[] = [];
-let cursor = -1; // current position in the queue, -1 = no selection
+let cursor = -1;
+
+// Cache pod state (re-read every 30s)
+let podsCacheTime = 0;
+let podsCache: PodEntry[] = [];
+
+function loadPods(): PodEntry[] {
+  const now = Date.now();
+  if (now - podsCacheTime < 30_000 && podsCache.length > 0) return podsCache;
+  try {
+    const data = JSON.parse(readFileSync(PODS_STATE_PATH, "utf-8"));
+    podsCache = (data.pods ?? []).filter((p: PodEntry) => p.active);
+    podsCacheTime = now;
+  } catch {
+    podsCache = [];
+  }
+  return podsCache;
+}
 
 function playCompletionSound(): void {
   try {
@@ -34,62 +61,7 @@ function playCompletionSound(): void {
       detached: true,
       stdio: "ignore",
     }).unref();
-  } catch {
-    // non-critical
-  }
-}
-
-function queryYabaiWindows(): YabaiWindow[] {
-  try {
-    const output = execSync("yabai -m query --windows 2>/dev/null", {
-      encoding: "utf-8",
-      timeout: 3000,
-    });
-    return JSON.parse(output) as YabaiWindow[];
-  } catch {
-    return [];
-  }
-}
-
-function matchSessionToWindow(
-  session: ClaudeSession,
-  windows: YabaiWindow[]
-): YabaiWindow | null {
-  const ghosttyWindows = windows.filter((w) => w.app === "Ghostty");
-  if (ghosttyWindows.length === 0) return null;
-
-  // Extract the meaningful part of the CWD for matching
-  const cwdParts = session.cwd.split("/");
-  const cwdBasename = cwdParts[cwdParts.length - 1]?.toLowerCase() ?? "";
-  // Also try parent/child for worktree paths like .../worktrees/main
-  const cwdParentChild =
-    cwdParts.length >= 2
-      ? `${cwdParts[cwdParts.length - 2]}/${cwdParts[cwdParts.length - 1]}`.toLowerCase()
-      : "";
-
-  // Try exact basename match first
-  for (const w of ghosttyWindows) {
-    const title = w.title.toLowerCase();
-    if (title === cwdBasename) return w;
-  }
-
-  // Try substring match (window title contains cwd basename or vice versa)
-  for (const w of ghosttyWindows) {
-    const title = w.title.toLowerCase();
-    if (cwdBasename && title.includes(cwdBasename)) return w;
-    if (cwdBasename && cwdBasename.includes(title) && title.length > 2)
-      return w;
-  }
-
-  // Try parent/child match for worktree-style paths
-  if (cwdParentChild) {
-    for (const w of ghosttyWindows) {
-      const title = w.title.toLowerCase();
-      if (title.includes(cwdParentChild)) return w;
-    }
-  }
-
-  return null;
+  } catch {}
 }
 
 function isSessionWorking(s: ClaudeSession): boolean {
@@ -99,24 +71,63 @@ function isSessionWorking(s: ClaudeSession): boolean {
   );
 }
 
+function resolveSessionLocation(
+  session: ClaudeSession
+): { workspace: number; tabTitle: string } | null {
+  // Primary: look up pod state — CWD → workspace + tab title
+  const pods = loadPods();
+  for (const pod of pods) {
+    if (pod.directory === session.cwd) {
+      const basename = pod.directory.split("/").pop() ?? "";
+      return { workspace: pod.workspace, tabTitle: basename };
+    }
+  }
+
+  // Fallback: query yabai to find a Ghostty window matching this CWD
+  try {
+    const output = execSync("yabai -m query --windows 2>/dev/null", {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    const windows: YabaiWindow[] = JSON.parse(output);
+    const ghostty = windows.filter((w) => w.app === "Ghostty");
+
+    const cwdParts = session.cwd.split("/");
+    const basename = cwdParts[cwdParts.length - 1] ?? "";
+    const norm = (s: string) => s.toLowerCase().replace(/[_-]/g, " ");
+    const normBase = norm(basename);
+
+    for (const w of ghostty) {
+      if (norm(w.title) === normBase) {
+        return { workspace: w.space, tabTitle: w.title };
+      }
+    }
+    for (const w of ghostty) {
+      const t = norm(w.title);
+      if (normBase && (t.includes(normBase) || normBase.includes(t))) {
+        return { workspace: w.space, tabTitle: w.title };
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
 export function updateCompletedSessions(sessions: ClaudeSession[]): void {
   const interactive = sessions.filter((s) => !s.isSubagent);
   const currentlyActive = new Set(
     interactive.filter(isSessionWorking).map((s) => s.pid)
   );
 
-  // Find sessions that were active last tick but are now idle = just completed
   const newlyCompleted = interactive.filter(
     (s) => previouslyActive.has(s.pid) && !currentlyActive.has(s.pid)
   );
 
   if (newlyCompleted.length > 0) {
-    const windows = queryYabaiWindows();
     const now = Date.now();
 
     for (const s of newlyCompleted) {
-      const win = matchSessionToWindow(s, windows);
-      // Remove if already in queue (re-completed)
+      const location = resolveSessionLocation(s);
       const existing = completedQueue.findIndex((c) => c.pid === s.pid);
       if (existing !== -1) completedQueue.splice(existing, 1);
 
@@ -124,21 +135,17 @@ export function updateCompletedSessions(sessions: ClaudeSession[]): void {
         pid: s.pid,
         cwd: s.cwd,
         completedAt: now,
-        windowId: win?.id ?? null,
-        windowTitle: win?.title ?? null,
-        windowSpace: win?.space ?? null,
+        workspace: location?.workspace ?? null,
+        tabTitle: location?.tabTitle ?? null,
       });
     }
 
-    // Keep only the last 50
     while (completedQueue.length > 50) completedQueue.pop();
-    // Reset cursor when new completions arrive
     cursor = -1;
-
     playCompletionSound();
   }
 
-  // Also remove sessions that no longer exist
+  // Remove sessions that no longer exist as processes
   const alivePids = new Set(interactive.map((s) => s.pid));
   for (let i = completedQueue.length - 1; i >= 0; i--) {
     if (!alivePids.has(completedQueue[i].pid)) {
@@ -147,8 +154,6 @@ export function updateCompletedSessions(sessions: ClaudeSession[]): void {
   }
 
   previouslyActive = currentlyActive;
-
-  // Write state for skhd scripts to read
   writeState(interactive);
 }
 
@@ -162,9 +167,7 @@ function writeState(interactive: ClaudeSession[]): void {
       completed: completedQueue,
     };
     writeFileSync(STATE_PATH, JSON.stringify(state));
-  } catch {
-    // non-critical
-  }
+  } catch {}
 }
 
 export function getCompletedQueue(): CompletedSession[] {
