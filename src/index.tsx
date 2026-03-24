@@ -20,7 +20,7 @@ if (args.includes("--snapshot") || args.includes("-s")) {
   // This one runs on a separate 10s timer as a safety net.
   const gcAvailable = typeof globalThis.gc === "function";
   process.stderr.write(
-    `[pulse] Started. gc=${gcAvailable ? "yes" : "NO (--expose-gc missing?)"} pid=${process.pid}\n`
+    `[pulse] Started. gc=${gcAvailable ? "yes" : "NO (--expose-gc missing?)"} pid=${process.pid} stdin.isTTY=${process.stdin.isTTY}\n`
   );
   setInterval(() => {
     if (gcAvailable) (globalThis as any).gc();

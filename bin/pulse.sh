@@ -35,8 +35,8 @@ while true; do
   exit_code=$?
   set -e
 
-  # Clean exit (user pressed q) — stop the supervisor
-  if [ "$exit_code" -eq 0 ]; then
+  # Clean exit: code 0 (q key), 130 (Ctrl+C/SIGINT), 143 (SIGTERM)
+  if [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 130 ] || [ "$exit_code" -eq 143 ]; then
     exit 0
   fi
 
