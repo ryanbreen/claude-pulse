@@ -52,17 +52,16 @@ if (args.includes("--snapshot") || args.includes("-s")) {
       });
       badgeProc.unref();
 
-      // Kill badge when TUI exits
-      const cleanup = () => {
+      // Kill badge when TUI exits. Only use "exit" event — registering
+      // SIGINT/SIGTERM handlers overrides Node's default behavior (exit),
+      // which was preventing Ctrl+C from actually killing the process.
+      process.on("exit", () => {
         if (badgeProc?.pid) {
           try {
             process.kill(badgeProc.pid);
           } catch {}
         }
-      };
-      process.on("exit", cleanup);
-      process.on("SIGINT", cleanup);
-      process.on("SIGTERM", cleanup);
+      });
     }
   }
 
