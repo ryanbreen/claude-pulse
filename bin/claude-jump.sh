@@ -21,7 +21,7 @@ if [ -f "$CURSOR_FILE" ]; then
   CURSOR=$(cat "$CURSOR_FILE" 2>/dev/null || echo "-1")
 fi
 
-# Get the currently focused window ID so we can skip it
+# Get the currently focused window ID (used for ordering, not filtering)
 FOCUSED_WINDOW=$(yabai -m query --windows --window 2>/dev/null | python3 -c "
 import json, sys
 try:
@@ -54,26 +54,53 @@ except:
 
 ghostty = [w for w in all_windows if w.get('app') == 'Ghostty']
 
+def normalize(s):
+    return s.lower().replace('_', ' ').replace('-', ' ')
+
 def resolve_window(entry):
+    # First: check cached window ID still exists
     wid = entry.get('windowId')
     if wid:
         for w in all_windows:
             if w.get('id') == wid:
                 return w
+    # Second: match CWD basename to window title (flexible matching)
     cwd = entry.get('cwd', '')
-    basename = cwd.rstrip('/').split('/')[-1].lower() if cwd else ''
-    if basename:
+    basename = cwd.rstrip('/').split('/')[-1] if cwd else ''
+    norm_base = normalize(basename)
+    if norm_base:
+        # Exact normalized match first
         for w in ghostty:
-            title = w.get('title', '').lower()
-            if title == basename or basename in title:
+            if normalize(w.get('title', '')) == norm_base:
                 return w
+        # Substring match
+        for w in ghostty:
+            title = normalize(w.get('title', ''))
+            if norm_base in title or title in norm_base:
+                return w
+    # Third: try matching against pod state — find the workspace, then
+    # match only if there's exactly one Ghostty window on that workspace
+    try:
+        import os
+        pods_file = os.path.expanduser('~/.claude-pods/state.json')
+        with open(pods_file) as pf:
+            pods = json.load(pf)
+        for pod in pods.get('pods', []):
+            if pod.get('active') and pod.get('directory') == cwd:
+                ws = pod.get('workspace')
+                ws_windows = [w for w in ghostty if w.get('space') == ws]
+                if len(ws_windows) == 1:
+                    return ws_windows[0]
+                break
+    except:
+        pass
     return None
 
 # Build list of (index, window, entry) for entries that resolve
 candidates = []
 for i, entry in enumerate(completed):
     win = resolve_window(entry)
-    if win is not None and str(win['id']) != focused:
+    if win is not None:
         candidates.append((i, win, entry))
 
 if not candidates:
