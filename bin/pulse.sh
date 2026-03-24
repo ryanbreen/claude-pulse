@@ -28,10 +28,10 @@ crash_times=()
 
 while true; do
   set +e
-  # Use `script` to allocate a pseudo-TTY so Ink gets raw mode for keyboard input.
-  # Bash scripts don't pass stdin as a TTY to child processes otherwise.
-  # stderr redirect goes inside the command so heap watchdog logs are captured.
-  script -q /dev/null bash -c "node dist/index.js $* 2>>\"$CRASH_LOG\""
+  # Run node directly. Keyboard input (q, Ctrl+C) works because the terminal
+  # passes stdin through to the child process when run interactively.
+  # stderr goes to crash log for heap watchdog messages.
+  node dist/index.js "$@" 2>>"$CRASH_LOG"
   exit_code=$?
   set -e
 
