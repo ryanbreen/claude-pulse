@@ -1,9 +1,12 @@
 #!/bin/bash
-# claude-jump.sh - Jump to recently completed Claude sessions via yabai
+# claude-jump.sh - Jump to recently completed Claude sessions
+# Navigates to the correct workspace, focuses the Ghostty window,
+# switches to the right tab, and navigates to the pane.
 # Usage: claude-jump.sh next | claude-jump.sh prev
 
 STATE_FILE="/tmp/claude-pulse-state.json"
 CURSOR_FILE="/tmp/claude-pulse-cursor"
+PODS_STATE="$HOME/.claude-pods/state.json"
 
 if [ ! -f "$STATE_FILE" ]; then
   echo "No claude-pulse state file found. Is claude-pulse running?" >&2
@@ -28,8 +31,8 @@ except:
     pass
 " 2>/dev/null)
 
-# Resolve window IDs for all completed sessions, find next/prev that isn't current
-WINDOW_ID=$(python3 -c "
+# Resolve completed sessions and find next/prev target
+RESULT=$(python3 -c "
 import json, subprocess, sys
 
 with open('$STATE_FILE') as f:
@@ -52,29 +55,26 @@ except:
 ghostty = [w for w in all_windows if w.get('app') == 'Ghostty']
 
 def resolve_window(entry):
-    \"\"\"Resolve a completed session to a yabai window ID.\"\"\"
     wid = entry.get('windowId')
-    # Verify cached window ID still exists
     if wid:
         for w in all_windows:
             if w.get('id') == wid:
-                return wid
-    # Fallback: match by CWD basename
+                return w
     cwd = entry.get('cwd', '')
     basename = cwd.rstrip('/').split('/')[-1].lower() if cwd else ''
     if basename:
         for w in ghostty:
             title = w.get('title', '').lower()
             if title == basename or basename in title:
-                return w['id']
+                return w
     return None
 
-# Build list of (index, window_id) for entries that resolve to a window
+# Build list of (index, window, entry) for entries that resolve
 candidates = []
 for i, entry in enumerate(completed):
-    wid = resolve_window(entry)
-    if wid is not None and str(wid) != focused:
-        candidates.append((i, wid))
+    win = resolve_window(entry)
+    if win is not None and str(win['id']) != focused:
+        candidates.append((i, win, entry))
 
 if not candidates:
     sys.exit(1)
@@ -82,9 +82,8 @@ if not candidates:
 cursor = $CURSOR
 direction = '$DIRECTION'
 
-# Find where we are in the candidates list
 current_pos = -1
-for j, (idx, wid) in enumerate(candidates):
+for j, (idx, win, entry) in enumerate(candidates):
     if idx == cursor:
         current_pos = j
         break
@@ -94,15 +93,64 @@ if direction == 'next':
 else:
     new_pos = (current_pos - 1) % len(candidates)
 
-chosen_idx, chosen_wid = candidates[new_pos]
+chosen_idx, chosen_win, chosen_entry = candidates[new_pos]
 
-# Output: cursor_index window_id
-print(f'{chosen_idx} {chosen_wid}')
+# Output: cursor_index window_id space_number cwd
+space = chosen_win.get('space', chosen_entry.get('windowSpace', 0))
+print(f'{chosen_idx}|{chosen_win[\"id\"]}|{space}|{chosen_entry[\"cwd\"]}')
 " 2>/dev/null)
 
-if [ -n "$WINDOW_ID" ]; then
-  NEW_CURSOR=$(echo "$WINDOW_ID" | awk '{print $1}')
-  WIN_ID=$(echo "$WINDOW_ID" | awk '{print $2}')
-  echo "$NEW_CURSOR" > "$CURSOR_FILE"
-  yabai -m window --focus "$WIN_ID" 2>/dev/null
+if [ -z "$RESULT" ]; then
+  exit 1
+fi
+
+IFS='|' read -r NEW_CURSOR WIN_ID SPACE CWD <<< "$RESULT"
+echo "$NEW_CURSOR" > "$CURSOR_FILE"
+
+# Step 1: Switch to the correct workspace
+CURRENT_SPACE=$(yabai -m query --spaces | python3 -c "
+import json, sys
+for s in json.load(sys.stdin):
+    if s.get('has-focus'):
+        print(s['index'])
+        break
+" 2>/dev/null)
+
+if [ "$CURRENT_SPACE" != "$SPACE" ] && [ -n "$SPACE" ] && [ "$SPACE" != "0" ]; then
+  yabai -m space --focus "$SPACE" 2>/dev/null
+  sleep 0.2
+fi
+
+# Step 2: Focus the Ghostty window
+yabai -m window --focus "$WIN_ID" 2>/dev/null
+sleep 0.1
+
+# Step 3: Switch to the correct tab using pod state
+# We use the Ghostty Window menu to find tab names for the focused window,
+# then match the CWD basename to find the right tab index
+if [ -n "$CWD" ]; then
+  CWD_BASENAME=$(basename "$CWD")
+
+  # Use AppleScript to get the list of tabs in the focused window
+  # and click the one matching our target
+  osascript -e "
+    tell application \"System Events\"
+      tell process \"Ghostty\"
+        set menuItems to name of every menu item of menu \"Window\" of menu bar 1
+        set targetName to \"$CWD_BASENAME\"
+
+        -- Find and click the matching menu item
+        repeat with itemName in menuItems
+          if itemName is not missing value then
+            set lowerItem to do shell script \"echo \" & quoted form of (itemName as text) & \" | tr '[:upper:]' '[:lower:]'\"
+            set lowerTarget to do shell script \"echo \" & quoted form of targetName & \" | tr '[:upper:]' '[:lower:]'\"
+            if lowerItem contains lowerTarget or lowerTarget contains lowerItem then
+              click menu item (itemName as text) of menu \"Window\" of menu bar 1
+              exit repeat
+            end if
+          end if
+        end repeat
+      end tell
+    end tell
+  " 2>/dev/null
 fi

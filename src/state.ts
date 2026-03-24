@@ -1,5 +1,5 @@
 import { writeFileSync } from "fs";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import { ACTIVE_CPU_THRESHOLD, type ClaudeSession } from "./scanner.js";
 
 const STATE_PATH = "/tmp/claude-pulse-state.json";
@@ -20,12 +20,24 @@ interface CompletedSession {
   completedAt: number; // timestamp when it went idle
   windowId: number | null; // yabai window id
   windowTitle: string | null;
+  windowSpace: number | null; // yabai workspace number
 }
 
 // Track which sessions were previously active
 let previouslyActive = new Set<number>();
 const completedQueue: CompletedSession[] = [];
 let cursor = -1; // current position in the queue, -1 = no selection
+
+function playCompletionSound(): void {
+  try {
+    spawn("afplay", ["/System/Library/Sounds/Glass.aiff", "-v", "0.5"], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  } catch {
+    // non-critical
+  }
+}
 
 function queryYabaiWindows(): YabaiWindow[] {
   try {
@@ -114,6 +126,7 @@ export function updateCompletedSessions(sessions: ClaudeSession[]): void {
         completedAt: now,
         windowId: win?.id ?? null,
         windowTitle: win?.title ?? null,
+        windowSpace: win?.space ?? null,
       });
     }
 
@@ -121,6 +134,8 @@ export function updateCompletedSessions(sessions: ClaudeSession[]): void {
     while (completedQueue.length > 50) completedQueue.pop();
     // Reset cursor when new completions arrive
     cursor = -1;
+
+    playCompletionSound();
   }
 
   // Also remove sessions that no longer exist
