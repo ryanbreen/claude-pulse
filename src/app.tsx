@@ -26,11 +26,24 @@ import { getUsageInfo, type UsageInfo } from "./usage.js";
 const SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588";
 const HEAT = ["\u00b7", "\u2591", "\u2592", "\u2593", "\u2588"];
 
+import { spawn as cpSpawn } from "child_process";
+
 // Memory safety constants — checked every 3s INSIDE the refresh callback
-// (not a separate timer that can be starved by the event loop).
 const HEAP_LIMIT_MB = 300;
 const MAX_LIFETIME_MS = 2 * 60 * 60 * 1000; // 2 hours
 const PROCESS_START = Date.now();
+
+// Spawn a fresh node process inheriting the terminal, then exit.
+// This replaces the bash supervisor loop which broke TTY/keyboard access.
+function selfRestart(reason: string): never {
+  process.stderr.write(`[pulse] ${reason} Restarting.\n`);
+  const child = cpSpawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+    stdio: "inherit",
+    detached: true,
+  });
+  child.unref();
+  process.exit(0);
+}
 
 // ANSI escape codes — used to build colored strings directly instead of
 // creating hundreds of React <Text> elements per render. Ink's reconciler
@@ -694,20 +707,14 @@ export default function App() {
         );
       }
 
-      // Exit before OOM — supervisor restarts in 2s
+      // Self-restart before OOM
       if (heapMB > HEAP_LIMIT_MB) {
-        process.stderr.write(
-          `[pulse] Heap ${heapMB}MB > ${HEAP_LIMIT_MB}MB limit. Exiting for restart.\n`
-        );
-        process.exit(1);
+        selfRestart(`Heap ${heapMB}MB > ${HEAP_LIMIT_MB}MB limit.`);
       }
 
-      // Max lifetime: restart every 2h to reclaim any leaked memory
+      // Self-restart every 2h to reclaim any leaked memory
       if (Date.now() - PROCESS_START > MAX_LIFETIME_MS) {
-        process.stderr.write(
-          `[pulse] Max lifetime (2h) reached. Exiting for restart.\n`
-        );
-        process.exit(1);
+        selfRestart("Max lifetime (2h) reached.");
       }
 
       const currentSessions = getActiveSessions();

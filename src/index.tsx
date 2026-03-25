@@ -1,6 +1,6 @@
 import React from "react";
 import { render } from "ink";
-import { spawn, execFileSync } from "child_process";
+import { spawn } from "child_process";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -25,10 +25,13 @@ if (args.includes("--snapshot") || args.includes("-s")) {
     if (gcAvailable) (globalThis as any).gc();
     const heapMB = process.memoryUsage().heapUsed / 1024 / 1024;
     if (heapMB > 350) {
-      process.stderr.write(
-        `[pulse] Backup watchdog: ${Math.round(heapMB)}MB > 350MB. Exiting.\n`
-      );
-      process.exit(1);
+      process.stderr.write(`[pulse] Backup watchdog: ${Math.round(heapMB)}MB > 350MB. Restarting.\n`);
+      const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+        stdio: "inherit",
+        detached: true,
+      });
+      child.unref();
+      process.exit(0);
     }
   }, 10_000);
 
