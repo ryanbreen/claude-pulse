@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "fs";
-import { execSync, spawn } from "child_process";
+import { execSync } from "child_process";
 import { homedir } from "os";
 import { join } from "path";
 import { ACTIVE_CPU_THRESHOLD, type ClaudeSession } from "./scanner.js";
@@ -38,6 +38,11 @@ let previouslyActive = new Set<number>();
 const completedQueue: CompletedSession[] = [];
 let cursor = -1;
 
+// Track workspace info for working sessions (needed to focus after crash)
+let previousWorkingInfo = new Map<number, { workspace: number | null; tabTitle: string | null }>();
+// Don't re-alert for the same stalled session
+const alertedStalled = new Set<number>();
+
 // Cache pod state (re-read every 30s)
 let podsCacheTime = 0;
 let podsCache: PodEntry[] = [];
@@ -55,14 +60,9 @@ function loadPods(): PodEntry[] {
   return podsCache;
 }
 
-function playCompletionSound(): void {
-  try {
-    spawn("afplay", ["/System/Library/Sounds/Glass.aiff", "-v", "0.75"], {
-      detached: true,
-      stdio: "ignore",
-    }).unref();
-  } catch {}
-}
+
+
+
 
 function isSessionWorking(s: ClaudeSession): boolean {
   return (
@@ -118,11 +118,27 @@ export function updateCompletedSessions(sessions: ClaudeSession[]): void {
   const currentlyActive = new Set(
     interactive.filter(isSessionWorking).map((s) => s.pid)
   );
+  const alivePids = new Set(interactive.map((s) => s.pid));
 
-  const newlyCompleted = interactive.filter(
-    (s) => previouslyActive.has(s.pid) && !currentlyActive.has(s.pid)
+  // === Detect crashed sessions (was working, PID gone) ===
+  const crashedPids: number[] = [];
+  for (const pid of previouslyActive) {
+    if (!alivePids.has(pid)) {
+      crashedPids.push(pid);
+    }
+  }
+
+  // === Detect newly stalled sessions (API error, no response) ===
+  const newlyStalled = interactive.filter(
+    (s) => s.turnState === "stalled" && !alertedStalled.has(s.pid)
   );
 
+  // === Detect normally completed sessions (exclude stalled) ===
+  const newlyCompleted = interactive.filter(
+    (s) => previouslyActive.has(s.pid) && !currentlyActive.has(s.pid) && s.turnState !== "stalled"
+  );
+
+  // === Handle normal completions ===
   if (newlyCompleted.length > 0) {
     const now = Date.now();
 
@@ -142,15 +158,46 @@ export function updateCompletedSessions(sessions: ClaudeSession[]): void {
 
     while (completedQueue.length > 50) completedQueue.pop();
     cursor = -1;
-    playCompletionSound();
   }
 
-  // Remove sessions that no longer exist as processes
-  const alivePids = new Set(interactive.map((s) => s.pid));
+  // === Handle errors (crashes + stalls) ===
+  if (crashedPids.length > 0 || newlyStalled.length > 0) {
+    for (const s of newlyStalled) alertedStalled.add(s.pid);
+  }
+
+  // === Clean up alertedStalled (session recovered or gone) ===
+  for (const pid of alertedStalled) {
+    const session = interactive.find((s) => s.pid === pid);
+    if (!session || session.turnState !== "stalled") {
+      alertedStalled.delete(pid);
+    }
+  }
+
+  // === Remove dead PIDs from completed queue ===
   for (let i = completedQueue.length - 1; i >= 0; i--) {
     if (!alivePids.has(completedQueue[i].pid)) {
       completedQueue.splice(i, 1);
     }
+  }
+
+  // === Update workspace info for working sessions (resolve only new ones) ===
+  for (const s of interactive.filter(isSessionWorking)) {
+    if (!previousWorkingInfo.has(s.pid)) {
+      const location = resolveSessionLocation(s);
+      previousWorkingInfo.set(s.pid, {
+        workspace: location?.workspace ?? null,
+        tabTitle: location?.tabTitle ?? null,
+      });
+    }
+  }
+  // Clean up info for sessions no longer working (keep crashed until handled)
+  for (const pid of previousWorkingInfo.keys()) {
+    if (!currentlyActive.has(pid) && !crashedPids.includes(pid)) {
+      previousWorkingInfo.delete(pid);
+    }
+  }
+  for (const pid of crashedPids) {
+    previousWorkingInfo.delete(pid);
   }
 
   previouslyActive = currentlyActive;

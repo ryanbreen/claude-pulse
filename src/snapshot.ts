@@ -21,6 +21,7 @@ export function renderSnapshot(): string {
   const idle = sessions.filter(
     (s) =>
       s.turnState === "idle" ||
+      s.turnState === "stalled" ||
       (s.turnState === "unknown" && s.cpuPercent <= ACTIVE_CPU_THRESHOLD)
   );
   const totalMem = (
@@ -108,14 +109,17 @@ export function renderSnapshot(): string {
     );
 
     for (const s of sessions) {
-      const isWorking =
+      const isStalled = s.turnState === "stalled";
+      const isWorking = !isStalled && (
         s.turnState === "working" ||
-        (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD);
-      const dot = isWorking
-        ? s.cpuPercent > 10
-          ? "⚡"
-          : "● "
-        : "○ ";
+        (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD));
+      const dot = isStalled
+        ? "✖ "
+        : isWorking
+          ? s.cpuPercent > 10
+            ? "⚡"
+            : "● "
+          : "○ ";
       const line =
         `  ${dot}` +
         `${String(s.pid).padEnd(7)}` +

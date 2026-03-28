@@ -193,11 +193,12 @@ function buildSessionTable(sessions: ClaudeSession[], dirWidth: number): string 
     const uptime = formatDuration(s.elapsedSeconds);
     const cpu = s.cpuPercent.toFixed(1);
 
-    const isWorking = s.turnState === "working" ||
-      (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD);
+    const isStalled = s.turnState === "stalled";
+    const isWorking = !isStalled && (s.turnState === "working" ||
+      (s.turnState === "unknown" && s.cpuPercent > ACTIVE_CPU_THRESHOLD));
 
-    const dotC = isWorking ? (s.cpuPercent > 10 ? A.grn : A.yel) : A.gry;
-    const dot = isWorking ? (s.cpuPercent > 10 ? "\u26a1" : "\u25cf ") : "\u25cb ";
+    const dotC = isStalled ? A.red : isWorking ? (s.cpuPercent > 10 ? A.grn : A.yel) : A.gry;
+    const dot = isStalled ? "\u2716 " : isWorking ? (s.cpuPercent > 10 ? "\u26a1" : "\u25cf ") : "\u25cb ";
     const uptC = s.elapsedSeconds > 43200 ? A.red : s.elapsedSeconds > 3600 ? A.yel : A.wht;
     const cpuC = s.cpuPercent > 10 ? A.grn : s.cpuPercent > 1 ? A.yel : A.gry;
     const modC = s.isSubagent ? A.gry :
@@ -254,6 +255,7 @@ function buildLiveView(p: {
   tick: number; heapMB: number;
   projectGroups: Map<string, ClaudeSession[]>;
   usage: UsageInfo | null;
+  stalledCount: number;
 }): string {
   const lines: string[] = [];
   const { W, colW: cw, sep, sparkWidth } = p;
@@ -315,9 +317,12 @@ function buildLiveView(p: {
     `${A.D}MEMORY${A.R}`
   );
   // Row 1 values
+  const idleStr = p.stalledCount > 0
+    ? `${A.B}${A.yel} ${p.idleSessions.length}${A.R} ${A.red}${A.B}\u2716${p.stalledCount}${A.R}`
+    : `${A.B}${A.yel} ${p.idleSessions.length}${A.R}`;
   lines.push(
     col(`${A.B}${A.grn} ${p.activeSessions.length}${A.R}`, cw) +
-    col(`${A.B}${A.yel} ${p.idleSessions.length}${A.R}`, cw) +
+    col(idleStr, cw) +
     col(`${A.B} ${p.interactive.length}${A.R}${subStr}`, cw) +
     col(`${A.B}${cpuC} ${p.totalCpu.toFixed(1)}%${A.R}`, cw) +
     `${A.B} ${p.totalMemGB} GB${A.R}`
@@ -807,8 +812,10 @@ export default function App() {
   const idleSessions = interactive.filter(
     (s) =>
       s.turnState === "idle" ||
+      s.turnState === "stalled" ||
       (s.turnState === "unknown" && s.cpuPercent <= ACTIVE_CPU_THRESHOLD)
   );
+  const stalledCount = interactive.filter((s) => s.turnState === "stalled").length;
   const totalMemGB = (
     sessions.reduce((sum, s) => sum + s.rssMB, 0) / 1024
   ).toFixed(1);
@@ -869,7 +876,7 @@ export default function App() {
     totalCpu, totalMemGB, longestSession,
     historyDigest, lastSyncStr, lastSyncColor,
     countData, cpuData, peakSessions,
-    sessions, dirWidth, tick, heapMB, projectGroups, usage,
+    sessions, dirWidth, tick, heapMB, projectGroups, usage, stalledCount,
   });
 
   // Minimal React tree: Box > Text (header) + Text (content) + Text (for history tab)
