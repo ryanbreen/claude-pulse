@@ -22,7 +22,6 @@ interface PodEntry {
   directory: string;
   workspace: number;
   mode: string;
-  active: boolean;
 }
 
 interface CompletedSession {
@@ -52,7 +51,7 @@ function loadPods(): PodEntry[] {
   if (now - podsCacheTime < 30_000 && podsCache.length > 0) return podsCache;
   try {
     const data = JSON.parse(readFileSync(PODS_STATE_PATH, "utf-8"));
-    podsCache = (data.pods ?? []).filter((p: PodEntry) => p.active);
+    podsCache = data.pods ?? [];
     podsCacheTime = now;
   } catch {
     podsCache = [];
