@@ -4,54 +4,66 @@ struct SessionRowView: View {
     let session: ClaudeSession
 
     var body: some View {
-        HStack(spacing: 6) {
-            statusDot
-                .frame(width: 10)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                statusDot
+                    .padding(.top, 1)
 
-            Text("\(session.pid)")
-                .font(.system(.caption, design: .monospaced))
-                .frame(width: 46, alignment: .leading)
+                agentTypeIcon
 
-            Text(formatTTY(session.tty))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .leading)
+                Text(projectName)
+                    .font(.system(.subheadline, design: .default))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
 
-            Text(formatDuration(session.elapsedSeconds))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(uptimeColor(session.elapsedSeconds))
-                .frame(width: 48, alignment: .trailing)
+                Text(formatDuration(session.elapsedSeconds))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(uptimeColor(session.elapsedSeconds))
+                    .monospacedDigit()
 
-            Text(String(format: "%.1f%%", session.cpuPercent))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(cpuColor(session.cpuPercent))
-                .frame(width: 44, alignment: .trailing)
+                Spacer(minLength: 0)
 
-            Text(String(format: "%.0fM", session.rssMB))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .trailing)
+                Text("↑ \(formatTokenRate(session.inputTokensPerMinute)) ↓ \(formatTokenRate(session.outputTokensPerMinute)) /min")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(tokenRateColor)
+                    .monospacedDigit()
+            }
 
-            Text(modeLabel)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(session.isSubagent ? .tertiary : .secondary)
-                .frame(width: 60, alignment: .leading)
+            HStack(spacing: 8) {
+                Text(session.workspaceID.map { "ws \($0)" } ?? "ws -")
+                Text(formatTTY(session.tty))
+                Text("pid \(String(session.pid))")
 
-            Text(truncatedPath(session.cwd))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(1)
-                .truncationMode(.head)
+                if session.didCrash {
+                    badge("CRASHED", color: .red)
+                }
+
+                if session.isSubagent {
+                    Text("sub")
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .padding(.leading, 24)
         }
-        .padding(.vertical, 1)
-        .opacity(session.isSubagent ? 0.6 : 1.0)
+        .padding(.vertical, 4)
     }
 
     private var statusDot: some View {
         Circle()
             .fill(dotColor)
-            .frame(width: 7, height: 7)
+            .frame(width: 8, height: 8)
+    }
+
+    private var agentTypeIcon: some View {
+        Image(systemName: agentTypeSymbol)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(agentTypeColor)
+            .frame(width: 14)
     }
 
     private var dotColor: Color {
@@ -67,17 +79,38 @@ struct SessionRowView: View {
         }
     }
 
-    private var modeLabel: String {
-        if session.isSubagent { return "subagent" }
-        if session.flags.isEmpty { return "new" }
-        return session.flags.joined(separator: "+")
+    private var agentTypeSymbol: String {
+        switch session.agentType {
+        case .claude:
+            return "brain.head.profile"
+        case .codex:
+            return "chevron.left.forwardslash.chevron.right"
+        case .gemini:
+            return "sparkles"
+        }
     }
 
-    private func formatTTY(_ tty: String) -> String {
-        if tty.hasPrefix("ttys") {
-            return "s" + tty.dropFirst(4)
+    private var agentTypeColor: Color {
+        switch session.agentType {
+        case .claude:
+            return .cyan
+        case .codex:
+            return .green
+        case .gemini:
+            return .purple
         }
-        return tty
+    }
+
+    private var projectName: String {
+        let trimmed = session.cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.isEmpty {
+            return session.cwd
+        }
+        return URL(fileURLWithPath: session.cwd).lastPathComponent
+    }
+
+    private var tokenRateColor: Color {
+        (session.inputTokensPerMinute + session.outputTokensPerMinute) > 0 ? .primary : .secondary
     }
 
     private func uptimeColor(_ seconds: Int) -> Color {
@@ -86,30 +119,15 @@ struct SessionRowView: View {
         return .primary
     }
 
-    private func cpuColor(_ cpu: Double) -> Color {
-        if cpu > 10.0 { return .green }
-        if cpu > 1.0 { return .yellow }
-        return .secondary
+    @ViewBuilder
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .foregroundStyle(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                Capsule()
+                    .fill(color.opacity(0.12))
+            )
     }
-
-    private func truncatedPath(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if path.hasPrefix(home) {
-            return "~" + path.dropFirst(home.count)
-        }
-        return path
-    }
-}
-
-func formatDuration(_ seconds: Int) -> String {
-    if seconds >= 3600 {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        return "\(h)h \(m)m"
-    }
-    if seconds >= 60 {
-        let m = seconds / 60
-        return "\(m)m"
-    }
-    return "\(seconds)s"
 }

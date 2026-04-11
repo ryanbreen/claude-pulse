@@ -1,192 +1,121 @@
 import Foundation
 
-struct TurnStateDetector {
-
-    // MARK: - Cache
-
-    private struct TurnTimestamps {
-        var lastHumanMessageTs: Double = 0
-        var lastAssistantAnyTs: Double = 0
-        var lastTurnEndTs: Double = 0
-        var lastToolUseTs: Double = 0
-        var lastToolResultTs: Double = 0
+struct TurnStateDetector: Sendable {
+    private struct TurnTimestamps: Sendable {
+        var lastHumanMessageTs: TimeInterval = 0
+        var lastAssistantAnyTs: TimeInterval = 0
+        var lastTurnEndTs: TimeInterval = 0
+        var lastToolUseTs: TimeInterval = 0
+        var lastToolResultTs: TimeInterval = 0
     }
 
-    struct CacheEntry {
-        let mtimeMs: TimeInterval
-        let state: TurnState
+    private let path: String
+    private let isSubagent: Bool
+    private var tailer: LogTailer
+    private var timestamps = TurnTimestamps()
+    private var sessionId: String?
+    private var cwd = "unknown"
+    private var lastEventAt: TimeInterval = 0
+
+    private var inputTokens = 0
+    private var cacheCreationInputTokens = 0
+    private var cachedInputTokens = 0
+    private var outputTokens = 0
+    private var reasoningOutputTokens = 0
+    private var thoughtTokens = 0
+    private var toolTokens = 0
+    private var totalTokens = 0
+
+    init(path: String) {
+        self.path = path
+        self.isSubagent = path.contains("/subagents/")
+        self.tailer = LogTailer(path: path)
     }
 
-    // Keyed by JSONL path — mtime-gated to skip re-parse when file is unchanged.
-    // Wrapped in a class so we can mutate from a static function without Sendable complaints.
-    private final class Cache: @unchecked Sendable {
-        var entries: [String: CacheEntry] = [:]
-        let maxSize = 100
-    }
+    mutating func readUpdates() -> [TokenDelta] {
+        let lines = tailer.readNewLines()
+        guard !lines.isEmpty else { return [] }
 
-    private static let cache = Cache()
+        var deltas: [TokenDelta] = []
 
-    // MARK: - Public entry point
-
-    static func detect(cwd: String, sessionId: String?, cpuPercent: Double) -> TurnState {
-        let fm = FileManager.default
-
-        guard let homeDir = fm.homeDirectoryForCurrentUser.path.nilIfEmpty else {
-            return .unknown
-        }
-
-        // Encode cwd: replace / with - (this already gives a leading -)
-        let projectDirName = cwd.replacingOccurrences(of: "/", with: "-")
-        let projectPath = "\(homeDir)/.claude/projects/\(projectDirName)"
-
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: projectPath, isDirectory: &isDir), isDir.boolValue else {
-            return .unknown
-        }
-
-        guard let jsonlPath = resolveJsonlPath(in: projectPath, sessionId: sessionId, fm: fm) else {
-            return .unknown
-        }
-
-        do {
-            let attrs = try fm.attributesOfItem(atPath: jsonlPath)
-            let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            let mtimeMs = mtime * 1000
-
-            if let hit = cache.entries[jsonlPath], hit.mtimeMs == mtimeMs {
-                return hit.state
-            }
-
-            let fileSize = (attrs[.size] as? Int) ?? 0
-            let timestamps = try parseTurnTimestamps(path: jsonlPath, fileSize: fileSize)
-            let state = deriveTurnState(timestamps, cpuPercent: cpuPercent)
-
-            cache.entries[jsonlPath] = CacheEntry(mtimeMs: mtimeMs, state: state)
-
-            // Evict oldest entry if over limit
-            if cache.entries.count > cache.maxSize {
-                if let firstKey = cache.entries.keys.first {
-                    cache.entries.removeValue(forKey: firstKey)
-                }
-            }
-
-            return state
-        } catch {
-            return .unknown
-        }
-    }
-
-    // MARK: - Path resolution
-
-    private static func resolveJsonlPath(in projectPath: String, sessionId: String?, fm: FileManager) -> String? {
-        if let sid = sessionId {
-            let candidate = "\(projectPath)/\(sid).jsonl"
-            if fm.fileExists(atPath: candidate) {
-                return candidate
-            }
-        }
-
-        // Fall back to most recently modified .jsonl that isn't an agent session
-        guard let entries = try? fm.contentsOfDirectory(atPath: projectPath) else {
-            return nil
-        }
-
-        let jsonlFiles = entries.filter { $0.hasSuffix(".jsonl") && !$0.hasPrefix("agent-") }
-        if jsonlFiles.isEmpty { return nil }
-
-        let withMtimes: [(path: String, mtime: TimeInterval)] = jsonlFiles.compactMap { name in
-            let full = "\(projectPath)/\(name)"
-            guard let attrs = try? fm.attributesOfItem(atPath: full),
-                  let date = attrs[.modificationDate] as? Date else { return nil }
-            return (full, date.timeIntervalSince1970)
-        }
-
-        return withMtimes.max(by: { $0.mtime < $1.mtime })?.path
-    }
-
-    // MARK: - JSONL parsing
-
-    private static func parseTurnTimestamps(path: String, fileSize: Int) throws -> TurnTimestamps {
-        guard let fh = FileHandle(forReadingAtPath: path) else {
-            throw CocoaError(.fileReadNoSuchFile)
-        }
-        defer { try? fh.close() }
-
-        let readSize = min(fileSize, 131_072)
-        let offset = max(0, fileSize - readSize)
-
-        try fh.seek(toOffset: UInt64(offset))
-        let data = fh.readDataToEndOfFile()
-
-        guard let tail = String(data: data, encoding: .utf8) else {
-            return TurnTimestamps()
-        }
-
-        var ts = TurnTimestamps()
-
-        for line in tail.split(separator: "\n", omittingEmptySubsequences: true) {
-            let lineStr = String(line)
-            if lineStr.trimmingCharacters(in: .whitespaces).isEmpty { continue }
-
-            if lineStr.utf8.count > 4096 {
-                // Lightweight regex path for large lines — skip heavy parse
-                processLargeLine(lineStr, into: &ts)
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
                 continue
             }
 
-            guard let lineData = lineStr.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
-            else { continue }
+            if let lineCwd = object["cwd"] as? String, !lineCwd.isEmpty {
+                cwd = lineCwd
+            }
+            if let lineSessionId = object["sessionId"] as? String, !lineSessionId.isEmpty {
+                sessionId = lineSessionId
+            }
 
-            let timestamp = extractTimestamp(from: obj)
-            guard let type = obj["type"] as? String else { continue }
+            let timestamp = Self.extractTimestamp(from: object)
+            if timestamp > lastEventAt {
+                lastEventAt = timestamp
+            }
+
+            guard let type = object["type"] as? String else { continue }
 
             switch type {
             case "system":
-                let sub = obj["subtype"] as? String ?? ""
-                if sub == "turn_duration" || sub == "stop_hook_summary" {
-                    if timestamp > ts.lastTurnEndTs { ts.lastTurnEndTs = timestamp }
+                let subtype = object["subtype"] as? String ?? ""
+                if subtype == "turn_duration" || subtype == "stop_hook_summary" {
+                    timestamps.lastTurnEndTs = max(timestamps.lastTurnEndTs, timestamp)
                 }
 
             case "assistant":
-                if timestamp > ts.lastAssistantAnyTs { ts.lastAssistantAnyTs = timestamp }
-                if let content = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] {
-                    if content.contains(where: { $0["type"] as? String == "tool_use" }) {
-                        if timestamp > ts.lastToolUseTs { ts.lastToolUseTs = timestamp }
-                    }
+                timestamps.lastAssistantAnyTs = max(timestamps.lastAssistantAnyTs, timestamp)
+
+                if let message = object["message"] as? [String: Any],
+                   let content = message["content"] as? [[String: Any]],
+                   content.contains(where: { $0["type"] as? String == "tool_use" }) {
+                    timestamps.lastToolUseTs = max(timestamps.lastToolUseTs, timestamp)
+                }
+
+                if let usage = (object["message"] as? [String: Any])?["usage"] as? [String: Any] {
+                    let delta = Self.makeClaudeTokenDelta(
+                        sessionKey: path,
+                        timestamp: timestamp,
+                        usage: usage
+                    )
+                    apply(delta: delta)
+                    deltas.append(delta)
                 }
 
             case "user":
-                let content = (obj["message"] as? [String: Any])?["content"]
+                let content = (object["message"] as? [String: Any])?["content"]
 
-                // Tool result check
-                if let contentArray = content as? [[String: Any]] {
-                    if contentArray.contains(where: { $0["type"] as? String == "tool_result" }) {
-                        if timestamp > ts.lastToolResultTs { ts.lastToolResultTs = timestamp }
-                        continue
-                    }
-                }
-                if let contentStr = content as? String, contentStr.contains("tool_result") {
-                    if timestamp > ts.lastToolResultTs { ts.lastToolResultTs = timestamp }
+                if let contentArray = content as? [[String: Any]],
+                   contentArray.contains(where: { $0["type"] as? String == "tool_result" }) {
+                    timestamps.lastToolResultTs = max(timestamps.lastToolResultTs, timestamp)
                     continue
                 }
 
-                // Human message check (exclude injected system noise)
+                if let contentString = content as? String, contentString.contains("tool_result") {
+                    timestamps.lastToolResultTs = max(timestamps.lastToolResultTs, timestamp)
+                    continue
+                }
+
                 if let contentArray = content as? [[String: Any]] {
                     let hasHumanText = contentArray.contains { block in
                         guard block["type"] as? String == "text",
                               let text = block["text"] as? String,
                               !text.isEmpty
-                        else { return false }
-                        return !isNonPrompt(text)
+                        else {
+                            return false
+                        }
+                        return !Self.isNonPrompt(text)
                     }
-                    if hasHumanText, timestamp > ts.lastHumanMessageTs {
-                        ts.lastHumanMessageTs = timestamp
+                    if hasHumanText {
+                        timestamps.lastHumanMessageTs = max(timestamps.lastHumanMessageTs, timestamp)
                     }
-                } else if let contentStr = content as? String, !contentStr.isEmpty {
-                    if !isNonPrompt(contentStr), timestamp > ts.lastHumanMessageTs {
-                        ts.lastHumanMessageTs = timestamp
-                    }
+                } else if let contentString = content as? String,
+                          !contentString.isEmpty,
+                          !Self.isNonPrompt(contentString) {
+                    timestamps.lastHumanMessageTs = max(timestamps.lastHumanMessageTs, timestamp)
                 }
 
             default:
@@ -194,140 +123,121 @@ struct TurnStateDetector {
             }
         }
 
-        return ts
+        return deltas
     }
 
-    // MARK: - Large-line fast path
-
-    private static func processLargeLine(_ line: String, into ts: inout TurnTimestamps) {
-        // Extract type and timestamp with lightweight string searches
-        guard let typeRange = line.range(of: #"^\{"type":"(\w+)""#, options: .regularExpression) else {
-            return
-        }
-        _ = typeRange  // used to confirm match exists
-
-        // Pull type value
-        guard let typeStart = line.range(of: "\"type\":\"")?.upperBound else { return }
-        guard let typeEnd = line[typeStart...].firstIndex(of: "\"") else { return }
-        let type = String(line[typeStart ..< typeEnd])
-
-        // Pull timestamp value
-        let timestamp: Double
-        if let tsKeyRange = line.range(of: "\"timestamp\":\"") {
-            let valStart = tsKeyRange.upperBound
-            if let valEnd = line[valStart...].firstIndex(of: "\"") {
-                let tsStr = String(line[valStart ..< valEnd])
-                timestamp = parseISOTimestamp(tsStr)
-            } else {
-                timestamp = 0
-            }
-        } else {
-            timestamp = 0
-        }
-
-        switch type {
-        case "system":
-            // Still parse fully — system entries are small in practice, but guard with try?
-            if let data = line.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let sub = obj["subtype"] as? String ?? ""
-                if sub == "turn_duration" || sub == "stop_hook_summary" {
-                    if timestamp > ts.lastTurnEndTs { ts.lastTurnEndTs = timestamp }
-                }
-            }
-
-        case "assistant":
-            if timestamp > ts.lastAssistantAnyTs { ts.lastAssistantAnyTs = timestamp }
-            if line.contains("\"tool_use\""), timestamp > ts.lastToolUseTs {
-                ts.lastToolUseTs = timestamp
-            }
-
-        case "user":
-            if line.contains("tool_result") {
-                if timestamp > ts.lastToolResultTs { ts.lastToolResultTs = timestamp }
-            } else if !line.contains("<local-command-") && !line.contains("[Request interrupted by user]") {
-                if timestamp > ts.lastHumanMessageTs { ts.lastHumanMessageTs = timestamp }
-            }
-
-        default:
-            break
-        }
+    func snapshot() -> SessionLogSnapshot {
+        SessionLogSnapshot(
+            sessionKey: path,
+            logPath: path,
+            agentType: .claude,
+            sessionId: sessionId,
+            cwd: cwd,
+            isSubagent: isSubagent,
+            lastEventAt: lastEventAt / 1000,
+            lastModifiedAt: tailer.lastMtime,
+            lastHumanMessageAt: timestamps.lastHumanMessageTs / 1000,
+            lastAssistantMessageAt: timestamps.lastAssistantAnyTs / 1000,
+            lastTurnCompleteAt: timestamps.lastTurnEndTs / 1000,
+            lastToolUseAt: timestamps.lastToolUseTs / 1000,
+            lastToolResultAt: timestamps.lastToolResultTs / 1000,
+            lastTaskStartedAt: 0,
+            lastTaskCompletedAt: 0,
+            lastSpeaker: lastSpeaker,
+            pendingToolCallCount: timestamps.lastToolUseTs > timestamps.lastToolResultTs ? 1 : 0,
+            hasCompletionEvent: timestamps.lastTurnEndTs >= timestamps.lastHumanMessageTs && timestamps.lastHumanMessageTs > 0,
+            inputTokens: inputTokens,
+            cacheCreationInputTokens: cacheCreationInputTokens,
+            cachedInputTokens: cachedInputTokens,
+            outputTokens: outputTokens,
+            reasoningOutputTokens: reasoningOutputTokens,
+            thoughtTokens: thoughtTokens,
+            toolTokens: toolTokens,
+            totalTokens: totalTokens
+        )
     }
 
-    // MARK: - State derivation
+    private var lastSpeaker: SessionSpeaker {
+        let ordered: [(SessionSpeaker, TimeInterval)] = [
+            (.system, timestamps.lastTurnEndTs),
+            (.assistant, timestamps.lastAssistantAnyTs),
+            (.user, timestamps.lastHumanMessageTs)
+        ]
 
-    private static func deriveTurnState(_ e: TurnTimestamps, cpuPercent: Double) -> TurnState {
-        if e.lastHumanMessageTs == 0 && e.lastTurnEndTs == 0 { return .unknown }
-
-        // Turn completed normally
-        if e.lastTurnEndTs >= e.lastHumanMessageTs { return .idle }
-
-        // Tool is in-flight (sent but no result yet, and sent after last turn end)
-        if e.lastToolUseTs > e.lastToolResultTs && e.lastToolUseTs > e.lastTurnEndTs {
-            return .working
-        }
-
-        let processIdle = cpuPercent < activeCpuThreshold
-        let now = Date().timeIntervalSince1970 * 1000  // ms
-
-        // Claude responded but no turn_duration for >30s at low CPU → probably done
-        if e.lastAssistantAnyTs > e.lastHumanMessageTs,
-           now - e.lastAssistantAnyTs > 30_000,
-           processIdle {
-            return .idle
-        }
-
-        // No assistant response after human message for >30s at low CPU → stalled
-        if e.lastAssistantAnyTs <= e.lastHumanMessageTs,
-           now - e.lastHumanMessageTs > 30_000,
-           processIdle {
-            return .stalled
-        }
-
-        return .working
+        return ordered.max(by: { $0.1 < $1.1 })?.0 ?? .unknown
     }
 
-    // MARK: - Helpers
+    private mutating func apply(delta: TokenDelta) {
+        inputTokens += delta.inputTokens
+        cacheCreationInputTokens += delta.cacheCreationInputTokens
+        cachedInputTokens += delta.cachedInputTokens
+        outputTokens += delta.outputTokens
+        reasoningOutputTokens += delta.reasoningOutputTokens
+        thoughtTokens += delta.thoughtTokens
+        toolTokens += delta.toolTokens
+        totalTokens += delta.totalTokens
+    }
 
-    private static func extractTimestamp(from obj: [String: Any]) -> Double {
-        if let ts = obj["timestamp"] as? String {
-            return parseISOTimestamp(ts)
+    private static func makeClaudeTokenDelta(sessionKey: String, timestamp: TimeInterval, usage: [String: Any]) -> TokenDelta {
+        TokenDelta(
+            sessionKey: sessionKey,
+            agentType: .claude,
+            timestamp: timestamp / 1000,
+            inputTokens: intValue(usage["input_tokens"]),
+            cacheCreationInputTokens: intValue(usage["cache_creation_input_tokens"]),
+            cachedInputTokens: intValue(usage["cache_read_input_tokens"]),
+            outputTokens: intValue(usage["output_tokens"]),
+            reasoningOutputTokens: 0,
+            thoughtTokens: 0,
+            toolTokens: 0
+        )
+    }
+
+    private static func extractTimestamp(from object: [String: Any]) -> TimeInterval {
+        if let timestamp = object["timestamp"] as? String {
+            return parseISOTimestamp(timestamp)
         }
-        if let ts = obj["timestamp"] as? Double {
-            // Could be seconds or milliseconds; values > 1e12 are already ms
-            return ts > 1_000_000_000_000 ? ts : ts * 1000
+        if let timestamp = object["timestamp"] as? Double {
+            return timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000
         }
-        if let ts = obj["timestamp"] as? Int {
-            let d = Double(ts)
-            return d > 1_000_000_000_000 ? d : d * 1000
+        if let timestamp = object["timestamp"] as? Int {
+            let value = Double(timestamp)
+            return value > 1_000_000_000_000 ? value : value * 1000
         }
         return 0
     }
 
-    private static func parseISOTimestamp(_ s: String) -> Double {
-        // Fast path: ISO 8601 with fractional seconds or Z suffix
+    private static func parseISOTimestamp(_ value: String) -> TimeInterval {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: s) {
+        if let date = formatter.date(from: value) {
             return date.timeIntervalSince1970 * 1000
         }
-        // Fallback without fractional seconds
+
         formatter.formatOptions = [.withInternetDateTime]
-        if let date = formatter.date(from: s) {
+        if let date = formatter.date(from: value) {
             return date.timeIntervalSince1970 * 1000
         }
+
         return 0
     }
 
-    private static func isNonPrompt(_ s: String) -> Bool {
-        s.contains("<local-command-") ||
-        s.contains("<command-name>") ||
-        s.contains("[Request interrupted by user]")
+    private static func intValue(_ raw: Any?) -> Int {
+        switch raw {
+        case let value as Int:
+            return value
+        case let value as Double:
+            return Int(value)
+        case let value as NSNumber:
+            return value.intValue
+        default:
+            return 0
+        }
     }
-}
 
-// MARK: - String helper
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
+    private static func isNonPrompt(_ value: String) -> Bool {
+        value.contains("<local-command-")
+            || value.contains("<command-name>")
+            || value.contains("[Request interrupted by user]")
+    }
 }

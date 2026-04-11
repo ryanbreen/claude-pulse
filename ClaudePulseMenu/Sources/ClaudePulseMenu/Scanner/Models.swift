@@ -1,12 +1,31 @@
 import Foundation
 
 let activeCpuThreshold: Double = 3.0
+let stalledAfterSeconds: TimeInterval = 60.0
+let geminiResponseTimeoutSeconds: TimeInterval = 30.0
+let recentLogPublishGraceSeconds: TimeInterval = 15.0
+
+enum AgentType: String, Sendable {
+    case claude, codex, gemini
+
+    var displayName: String {
+        rawValue.capitalized
+    }
+
+    var color: String {
+        switch self {
+        case .claude: return "cyan"
+        case .codex: return "green"
+        case .gemini: return "purple"
+        }
+    }
+}
 
 enum TurnState: String, Sendable {
     case working, idle, stalled, unknown
 }
 
-struct ClaudeSession: Identifiable, Sendable {
+struct AgentSession: Identifiable, Sendable {
     let id: Int
     let pid: Int
     let ppid: Int
@@ -18,9 +37,27 @@ struct ClaudeSession: Identifiable, Sendable {
     let command: String
     var cwd: String
     let flags: [String]
-    let sessionId: String?
+    var sessionId: String?
     let isSubagent: Bool
     var turnState: TurnState
+    let agentType: AgentType
+    var logPath: String?
+    var lastLogEventAt: TimeInterval
+    var lastLogMtime: TimeInterval
+    var didCrash: Bool
+    var hasCompletionEvent: Bool
+    var inputTokens: Int
+    var cacheCreationInputTokens: Int
+    var cachedInputTokens: Int
+    var outputTokens: Int
+    var reasoningOutputTokens: Int
+    var thoughtTokens: Int
+    var toolTokens: Int
+    var totalTokens: Int
+    var tokensPerMinute: Double
+    var inputTokensPerMinute: Double
+    var outputTokensPerMinute: Double
+    var workspaceID: Int?
 
     var isWorking: Bool {
         turnState == .working || (turnState == .unknown && cpuPercent > activeCpuThreshold)
@@ -28,6 +65,187 @@ struct ClaudeSession: Identifiable, Sendable {
 
     var isInteractive: Bool {
         !isSubagent
+    }
+}
+
+typealias ClaudeSession = AgentSession
+
+enum SessionSpeaker: String, Sendable {
+    case user, assistant, gemini, system, unknown
+}
+
+struct TokenDelta: Sendable {
+    let sessionKey: String
+    let agentType: AgentType
+    let timestamp: TimeInterval
+    let inputTokens: Int
+    let cacheCreationInputTokens: Int
+    let cachedInputTokens: Int
+    let outputTokens: Int
+    let reasoningOutputTokens: Int
+    let thoughtTokens: Int
+    let toolTokens: Int
+
+    var totalTokens: Int {
+        totalInputTokens + totalOutputTokens
+    }
+
+    var totalInputTokens: Int {
+        switch agentType {
+        case .claude:
+            return inputTokens + cacheCreationInputTokens + cachedInputTokens
+        case .codex, .gemini:
+            return inputTokens
+        }
+    }
+
+    var totalOutputTokens: Int {
+        switch agentType {
+        case .claude, .codex:
+            return outputTokens
+        case .gemini:
+            return outputTokens + thoughtTokens + toolTokens
+        }
+    }
+}
+
+struct SessionLogSnapshot: Sendable {
+    let sessionKey: String
+    let logPath: String
+    let agentType: AgentType
+    let sessionId: String?
+    let cwd: String
+    let isSubagent: Bool
+    let lastEventAt: TimeInterval
+    let lastModifiedAt: TimeInterval
+    let lastHumanMessageAt: TimeInterval
+    let lastAssistantMessageAt: TimeInterval
+    let lastTurnCompleteAt: TimeInterval
+    let lastToolUseAt: TimeInterval
+    let lastToolResultAt: TimeInterval
+    let lastTaskStartedAt: TimeInterval
+    let lastTaskCompletedAt: TimeInterval
+    let lastSpeaker: SessionSpeaker
+    let pendingToolCallCount: Int
+    let hasCompletionEvent: Bool
+    let inputTokens: Int
+    let cacheCreationInputTokens: Int
+    let cachedInputTokens: Int
+    let outputTokens: Int
+    let reasoningOutputTokens: Int
+    let thoughtTokens: Int
+    let toolTokens: Int
+    let totalTokens: Int
+
+    func resolvedTurnState(cpuPercent: Double, isAlive: Bool, now: TimeInterval) -> TurnState {
+        switch agentType {
+        case .claude:
+            return resolveClaudeTurnState(now: now)
+        case .codex:
+            return resolveCodexTurnState(cpuPercent: cpuPercent, isAlive: isAlive, now: now)
+        case .gemini:
+            return resolveGeminiTurnState(cpuPercent: cpuPercent, isAlive: isAlive, now: now)
+        }
+    }
+
+    func didCrash(isAlive: Bool) -> Bool {
+        guard !isAlive else { return false }
+
+        switch agentType {
+        case .claude:
+            return lastHumanMessageAt > lastTurnCompleteAt
+        case .codex:
+            return !hasCompletionEvent && lastTaskStartedAt > 0
+        case .gemini:
+            return lastSpeaker != .gemini && lastSpeaker != .unknown
+        }
+    }
+
+    func shouldPublishWithoutProcess(now: TimeInterval) -> Bool {
+        if didCrash(isAlive: false) {
+            // Show crashed sessions for up to 5 minutes so the user can see the badge,
+            // but don't keep them forever — avoids permanently pinning false-positive crashes.
+            let crashedDisplaySeconds: TimeInterval = 300
+            return now - lastModifiedAt <= crashedDisplaySeconds
+        }
+        return now - lastModifiedAt <= recentLogPublishGraceSeconds
+    }
+
+    private func resolveClaudeTurnState(now: TimeInterval) -> TurnState {
+        if lastHumanMessageAt == 0 && lastTurnCompleteAt == 0 {
+            return .unknown
+        }
+
+        if now - lastModifiedAt <= recentLogPublishGraceSeconds {
+            return .working
+        }
+
+        if lastTurnCompleteAt >= lastHumanMessageAt {
+            return .idle
+        }
+
+        if lastToolUseAt > lastToolResultAt && lastToolUseAt > lastTurnCompleteAt {
+            return .working
+        }
+
+        let nowMs = now * 1000
+
+        if lastAssistantMessageAt <= lastHumanMessageAt,
+           nowMs - lastHumanMessageAt > 120_000 {
+            return .stalled
+        }
+
+        return .working
+    }
+
+    private func resolveCodexTurnState(cpuPercent: Double, isAlive: Bool, now: TimeInterval) -> TurnState {
+        if hasCompletionEvent && lastTaskCompletedAt >= lastTaskStartedAt {
+            return .idle
+        }
+
+        if pendingToolCallCount > 0 {
+            return .working
+        }
+
+        if isAlive,
+           lastEventAt > 0,
+           now - lastEventAt > stalledAfterSeconds,
+           cpuPercent < activeCpuThreshold {
+            return .stalled
+        }
+
+        if lastTaskStartedAt > 0 || lastEventAt > 0 {
+            return .working
+        }
+
+        return .unknown
+    }
+
+    private func resolveGeminiTurnState(cpuPercent: Double, isAlive: Bool, now: TimeInterval) -> TurnState {
+        if lastSpeaker == .unknown {
+            return .unknown
+        }
+
+        if isAlive,
+           now - lastModifiedAt <= recentLogPublishGraceSeconds {
+            return .working
+        }
+
+        if lastSpeaker == .gemini {
+            return .idle
+        }
+
+        if lastSpeaker == .user,
+           now - lastHumanMessageAt > geminiResponseTimeoutSeconds,
+           cpuPercent < activeCpuThreshold {
+            return .stalled
+        }
+
+        if lastSpeaker == .user {
+            return .working
+        }
+
+        return .unknown
     }
 }
 

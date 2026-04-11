@@ -5,3 +5,17 @@ worker/.dev.vars
 .env
 bin/claude-badge
 .envrc
+
+# Swift build artifacts
+.build/
+.swiftpm/
+.swiftpm-cache/
+*.xcframework
+
+# Factory run scratchpads
+factory-runs/
+**/factory-runs/
+pulse-*-scratchpad.md
+
+# Accidental Ghostty source copies
+macos/

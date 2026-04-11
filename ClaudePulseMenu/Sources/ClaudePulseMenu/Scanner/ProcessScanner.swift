@@ -1,7 +1,7 @@
 import Foundation
 
 struct ProcessScanner {
-    static func scan() -> [ClaudeSession] {
+    static func scan() -> [AgentSession] {
         guard let psOutput = runCommand("/bin/ps", args: ["-eo", "pid,ppid,tty,etime,%cpu,rss,command"]) else {
             return []
         }
@@ -17,40 +17,50 @@ struct ProcessScanner {
             }
         }
 
-        var claudePids: Set<Int> = []
-        var parsedLines: [(line: String, pid: Int)] = []
+        var agentPids: Set<Int> = []
+        var parsedEntries: [(line: String, pid: Int, agentType: AgentType)] = []
 
         for line in lines {
-            guard line.contains("claude"), line.contains("--") else { continue }
-            guard !line.contains("/bin/sh"), !line.contains("/bin/zsh"), !line.contains("grep") else { continue }
-
             guard let parsed = parsePsLine(line) else { continue }
-            guard parsed.command.range(of: #"\bclaude\s+--"#, options: .regularExpression) != nil else { continue }
 
-            claudePids.insert(parsed.pid)
-            parsedLines.append((line: line, pid: parsed.pid))
+            if let agentType = classifyAgent(command: parsed.command) {
+                agentPids.insert(parsed.pid)
+                parsedEntries.append((line: line, pid: parsed.pid, agentType: agentType))
+            }
         }
 
-        var sessions: [ClaudeSession] = []
+        var sessions: [AgentSession] = []
 
-        for item in parsedLines {
-            guard let parsed = parsePsLine(item.line) else { continue }
-            guard parsed.command.range(of: #"\bclaude\s+--"#, options: .regularExpression) != nil else { continue }
+        for entry in parsedEntries {
+            guard let parsed = parsePsLine(entry.line) else { continue }
 
-            let isSubagent = hasClaudeAncestor(pid: parsed.pid, claudePids: claudePids, pidToPpid: allPidToPpid)
-                || parsed.command.contains("--print")
+            let isSubagent: Bool
+            switch entry.agentType {
+            case .claude:
+                isSubagent = hasAgentAncestor(pid: parsed.pid, agentPids: agentPids, pidToPpid: allPidToPpid)
+            case .codex:
+                isSubagent = false
+            case .gemini:
+                isSubagent = false
+            }
 
             var flags: [String] = []
-            if parsed.command.contains("--continue") || parsed.command.range(of: #"\s-c(\s|$)"#, options: .regularExpression) != nil {
-                flags.append("continue")
+            if entry.agentType == .claude {
+                if parsed.command.contains("--continue") || parsed.command.range(of: #"\s-c(\s|$)"#, options: .regularExpression) != nil {
+                    flags.append("continue")
+                }
+                if parsed.command.contains("--resume") || parsed.command.range(of: #"\s-r(\s|$)"#, options: .regularExpression) != nil {
+                    flags.append("resume")
+                }
             }
-            if parsed.command.contains("--resume") || parsed.command.range(of: #"\s-r(\s|$)"#, options: .regularExpression) != nil {
-                flags.append("resume")
+            if entry.agentType == .codex {
+                if parsed.command.contains("--full-auto") { flags.append("full-auto") }
+                if parsed.command.contains(" exec ") { flags.append("exec") }
             }
 
-            let sessionId = extractSessionId(from: parsed.command)
+            let sessionId = entry.agentType == .claude ? extractSessionId(from: parsed.command) : nil
 
-            let session = ClaudeSession(
+            let session = AgentSession(
                 id: parsed.pid,
                 pid: parsed.pid,
                 ppid: parsed.ppid,
@@ -64,7 +74,25 @@ struct ProcessScanner {
                 flags: flags,
                 sessionId: sessionId,
                 isSubagent: isSubagent,
-                turnState: .unknown
+                turnState: .unknown,
+                agentType: entry.agentType,
+                logPath: nil,
+                lastLogEventAt: 0,
+                lastLogMtime: 0,
+                didCrash: false,
+                hasCompletionEvent: false,
+                inputTokens: 0,
+                cacheCreationInputTokens: 0,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                reasoningOutputTokens: 0,
+                thoughtTokens: 0,
+                toolTokens: 0,
+                totalTokens: 0,
+                tokensPerMinute: 0,
+                inputTokensPerMinute: 0,
+                outputTokensPerMinute: 0,
+                workspaceID: nil
             )
             sessions.append(session)
         }
@@ -74,15 +102,6 @@ struct ProcessScanner {
 
         for i in sessions.indices {
             sessions[i].cwd = cwdMap[sessions[i].pid] ?? "unknown"
-        }
-
-        for i in sessions.indices {
-            guard !sessions[i].isSubagent, sessions[i].cwd != "unknown" else { continue }
-            sessions[i].turnState = TurnStateDetector.detect(
-                cwd: sessions[i].cwd,
-                sessionId: sessions[i].sessionId,
-                cpuPercent: sessions[i].cpuPercent
-            )
         }
 
         return sessions.sorted { $0.cpuPercent > $1.cpuPercent }
@@ -128,11 +147,33 @@ struct ProcessScanner {
         )
     }
 
-    private static func hasClaudeAncestor(pid: Int, claudePids: Set<Int>, pidToPpid: [Int: Int]) -> Bool {
+    private static func classifyAgent(command: String) -> AgentType? {
+        if command.contains("/bin/sh") || command.contains("/bin/zsh") || command.contains("grep") {
+            return nil
+        }
+
+        if command.range(of: #"\bclaude\s+--"#, options: .regularExpression) != nil {
+            return .claude
+        }
+
+        // Codex: match `codex` as an executable token or a node-wrapped `/codex/` path.
+        if command.range(of: #"\bcodex(\s|$)"#, options: .regularExpression) != nil ||
+           command.range(of: #"/codex/"#, options: .regularExpression) != nil {
+            return .codex
+        }
+
+        if command.range(of: #"\bgemini\b"#, options: .regularExpression) != nil {
+            return .gemini
+        }
+
+        return nil
+    }
+
+    private static func hasAgentAncestor(pid: Int, agentPids: Set<Int>, pidToPpid: [Int: Int]) -> Bool {
         var current = pidToPpid[pid]
-        for _ in 0..<3 {
+        for _ in 0..<5 {
             guard let ancestor = current else { break }
-            if claudePids.contains(ancestor) { return true }
+            if agentPids.contains(ancestor) { return true }
             current = pidToPpid[ancestor]
         }
         return false

@@ -8,11 +8,15 @@ struct ClaudePulseMenuApp: App {
         MenuBarExtra {
             MenuPopoverView(manager: manager)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: manager.activeCount > 0 ? "bolt.fill" : "bolt")
-                Text("\(manager.activeCount)/\(manager.totalCount)")
-                    .monospacedDigit()
+            HStack(spacing: 5) {
+                Text("⚡")
+                Text("\(manager.activeCount)")
+
+                if manager.globalInputTokensPerMinute > 0 || manager.globalOutputTokensPerMinute > 0 {
+                    Text("↑\(formatTokenRate(manager.globalInputTokensPerMinute)) ↓\(formatTokenRate(manager.globalOutputTokensPerMinute))")
+                }
             }
+            .monospacedDigit()
         }
         .menuBarExtraStyle(.window)
     }
