@@ -70,6 +70,20 @@ struct AgentSession: Identifiable, Sendable {
 
 typealias ClaudeSession = AgentSession
 
+struct ScanResult: Sendable {
+    let sessions: [AgentSession]
+    let parentMap: [Int: Int]
+}
+
+struct SessionNode: Identifiable, Sendable {
+    let session: AgentSession
+    var children: [SessionNode]
+
+    var id: Int {
+        session.id
+    }
+}
+
 enum SessionSpeaker: String, Sendable {
     case user, assistant, gemini, system, unknown
 }

@@ -1,9 +1,11 @@
 import Foundation
 
 struct ProcessScanner {
-    static func scan() -> [AgentSession] {
+    private static let maxAncestorWalkDepth = 10
+
+    static func scan() -> ScanResult {
         guard let psOutput = runCommand("/bin/ps", args: ["-eo", "pid,ppid,tty,etime,%cpu,rss,command"]) else {
-            return []
+            return ScanResult(sessions: [], parentMap: [:])
         }
 
         let lines = psOutput.components(separatedBy: "\n")
@@ -30,19 +32,21 @@ struct ProcessScanner {
         }
 
         var sessions: [AgentSession] = []
+        var parentMap: [Int: Int] = [:]
+
+        for entry in parsedEntries {
+            if let parentPid = findAgentAncestor(
+                pid: entry.pid,
+                agentPids: agentPids,
+                pidToPpid: allPidToPpid,
+                maxDepth: maxAncestorWalkDepth
+            ) {
+                parentMap[entry.pid] = parentPid
+            }
+        }
 
         for entry in parsedEntries {
             guard let parsed = parsePsLine(entry.line) else { continue }
-
-            let isSubagent: Bool
-            switch entry.agentType {
-            case .claude:
-                isSubagent = hasAgentAncestor(pid: parsed.pid, agentPids: agentPids, pidToPpid: allPidToPpid)
-            case .codex:
-                isSubagent = false
-            case .gemini:
-                isSubagent = false
-            }
 
             var flags: [String] = []
             if entry.agentType == .claude {
@@ -73,7 +77,7 @@ struct ProcessScanner {
                 cwd: "unknown",
                 flags: flags,
                 sessionId: sessionId,
-                isSubagent: isSubagent,
+                isSubagent: parentMap[parsed.pid] != nil,
                 turnState: .unknown,
                 agentType: entry.agentType,
                 logPath: nil,
@@ -104,7 +108,10 @@ struct ProcessScanner {
             sessions[i].cwd = cwdMap[sessions[i].pid] ?? "unknown"
         }
 
-        return sessions.sorted { $0.cpuPercent > $1.cpuPercent }
+        return ScanResult(
+            sessions: sessions.sorted { $0.cpuPercent > $1.cpuPercent },
+            parentMap: parentMap
+        )
     }
 
     // MARK: - Private helpers
@@ -169,29 +176,34 @@ struct ProcessScanner {
         return nil
     }
 
-    private static func hasAgentAncestor(pid: Int, agentPids: Set<Int>, pidToPpid: [Int: Int]) -> Bool {
+    private static func findAgentAncestor(
+        pid: Int,
+        agentPids: Set<Int>,
+        pidToPpid: [Int: Int],
+        maxDepth: Int
+    ) -> Int? {
         var current = pidToPpid[pid]
-        for _ in 0..<5 {
+        for _ in 0..<maxDepth {
             guard let ancestor = current else { break }
-            if agentPids.contains(ancestor) { return true }
+            if agentPids.contains(ancestor) { return ancestor }
             current = pidToPpid[ancestor]
         }
-        return false
+        return nil
     }
 
     private static func extractSessionId(from command: String) -> String? {
-        let uuidPattern = #"--session-id\s+([a-f0-9-]+)"#
-        if let range = command.range(of: uuidPattern, options: .regularExpression) {
-            let match = String(command[range])
-            let components = match.components(separatedBy: .whitespaces)
-            if components.count >= 2 { return components[1] }
-        }
-
-        let shortPattern = #"-s\s+([a-f0-9-]+)"#
-        if let range = command.range(of: shortPattern, options: .regularExpression) {
-            let match = String(command[range])
-            let components = match.components(separatedBy: .whitespaces)
-            if components.count >= 2 { return components[1] }
+        // Match --session-id UUID, --resume UUID, -s UUID, -r UUID
+        for pattern in [
+            #"--session-id\s+([a-f0-9-]+)"#,
+            #"--resume\s+([a-f0-9-]+)"#,
+            #"\s-s\s+([a-f0-9-]+)"#,
+            #"\s-r\s+([a-f0-9-]+)"#
+        ] {
+            if let range = command.range(of: pattern, options: .regularExpression) {
+                let match = String(command[range])
+                let components = match.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                if components.count >= 2 { return components.last }
+            }
         }
 
         return nil

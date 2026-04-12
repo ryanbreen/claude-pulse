@@ -6,8 +6,13 @@ struct StatsBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text("⚡ \(manager.activeCount) busy")
+                Text("⚡ \(manager.activeCount) active")
                     .foregroundStyle(.primary)
+
+                if manager.totalAgentCount > 0 {
+                    Text("(\(manager.totalAgentCount) total)")
+                        .foregroundStyle(.secondary)
+                }
 
                 Text("↑ \(formatTokenRate(manager.globalInputTokensPerMinute)) ↓ \(formatTokenRate(manager.globalOutputTokensPerMinute)) /min")
                     .foregroundStyle(.secondary)

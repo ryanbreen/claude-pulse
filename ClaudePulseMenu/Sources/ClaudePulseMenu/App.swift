@@ -9,8 +9,7 @@ struct ClaudePulseMenuApp: App {
             MenuPopoverView(manager: manager)
         } label: {
             HStack(spacing: 5) {
-                Text("⚡")
-                Text("\(manager.activeCount)")
+                Text("⚡ \(manager.activeCount)")
 
                 if manager.globalInputTokensPerMinute > 0 || manager.globalOutputTokensPerMinute > 0 {
                     Text("↑\(formatTokenRate(manager.globalInputTokensPerMinute)) ↓\(formatTokenRate(manager.globalOutputTokensPerMinute))")

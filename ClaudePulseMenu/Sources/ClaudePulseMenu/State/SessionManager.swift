@@ -4,6 +4,9 @@ import SwiftUI
 @Observable
 class SessionManager {
     var sessions: [ClaudeSession] = []
+    var sessionTrees: [SessionNode] = []
+    var busyRootCount: Int = 0
+    var totalAgentCount: Int = 0
     var activeCount: Int = 0
     var idleCount: Int = 0
     var stalledCount: Int = 0
@@ -24,6 +27,9 @@ class SessionManager {
 
     private struct RefreshResult {
         let sessions: [AgentSession]
+        let sessionTrees: [SessionNode]
+        let busyRootCount: Int
+        let totalAgentCount: Int
         let activeCount: Int
         let idleCount: Int
         let stalledCount: Int
@@ -90,6 +96,9 @@ class SessionManager {
                 guard let self else { return }
 
                 self.sessions = result.sessions
+                self.sessionTrees = result.sessionTrees
+                self.busyRootCount = result.busyRootCount
+                self.totalAgentCount = result.totalAgentCount
                 self.activeCount = result.activeCount
                 self.idleCount = result.idleCount
                 self.stalledCount = result.stalledCount
@@ -123,7 +132,9 @@ class SessionManager {
         deltas.append(contentsOf: updateCodexParsers(with: changedCodexLogs))
         deltas.append(contentsOf: updateGeminiParsers(with: changedGeminiLogs))
 
-        let processes = ProcessScanner.scan()
+        let scanResult = ProcessScanner.scan()
+        let processes = scanResult.sessions
+        let parentMap = scanResult.parentMap
         let alivePids = Set(processes.map(\.pid))
         processStartTimes = processStartTimes.filter { alivePids.contains($0.key) }
         bootstrapClaudeProcesses(processes: processes)
@@ -143,18 +154,27 @@ class SessionManager {
             return s
         }
 
-        let interactive = merged.filter { !$0.isSubagent }
-        let subagents = merged.filter { $0.isSubagent }
-        // "Active" = had real token traffic in the last 60s. State machine "working" is unreliable
-        // because it can mark sessions as working forever based on stale tool_use entries.
-        let active = interactive.filter { ($0.inputTokensPerMinute + $0.outputTokensPerMinute) > 0 }
+        let interactive = merged.filter { !isSessionSubagent($0, parentMap: parentMap) }
+        let subagents = merged.filter { isSessionSubagent($0, parentMap: parentMap) }
+        let recencyCutoff: TimeInterval = 300  // 5 minutes
+
+        // "Active" = had real token traffic in the last 60s, OR turn state is working
+        // with recent log activity (catches orchestrator/factory sessions waiting on
+        // sub-agents with a pending tool_use but no token traffic of their own).
+        let active = interactive.filter { session in
+            if (session.inputTokensPerMinute + session.outputTokensPerMinute) > 0 { return true }
+            if session.turnState == .working {
+                let lastActivity = max(session.lastLogEventAt, session.lastLogMtime)
+                return lastActivity > 0 && (now - lastActivity) < recencyCutoff
+            }
+            return false
+        }
         // "Stalled" only counts if the log was recently touched. A session that hasn't moved
         // in hours is dormant, not stalled — the user walked away.
-        let stalledRecencyCutoff: TimeInterval = 300  // 5 minutes
         let stalled = interactive.filter { session in
             guard session.turnState == .stalled else { return false }
             let lastActivity = max(session.lastLogEventAt, session.lastLogMtime)
-            return lastActivity > 0 && (now - lastActivity) < stalledRecencyCutoff
+            return lastActivity > 0 && (now - lastActivity) < recencyCutoff
         }
         let idle = interactive.filter { ($0.inputTokensPerMinute + $0.outputTokensPerMinute) == 0 && $0.turnState != .stalled }
 
@@ -187,8 +207,15 @@ class SessionManager {
             return lhs.pid < rhs.pid
         }
 
+        // Build session trees from parentMap
+        let trees = buildSessionTrees(allSessions: merged, parentMap: parentMap)
+        let busyRoots = trees.filter { $0.session.agentType == .claude && Self.isNodeBusy($0) }.count
+
         return RefreshResult(
             sessions: sortedInteractive + sortedSubagents,
+            sessionTrees: trees,
+            busyRootCount: busyRoots,
+            totalAgentCount: merged.count,
             activeCount: active.count,
             idleCount: idle.count,
             stalledCount: stalled.count,
@@ -207,6 +234,14 @@ class SessionManager {
             globalInputTokensPerMinute: tokenRateTracker.globalInputTokensPerMinute(now: now),
             globalOutputTokensPerMinute: tokenRateTracker.globalOutputTokensPerMinute(now: now)
         )
+    }
+
+    private func isSessionSubagent(_ session: AgentSession, parentMap: [Int: Int]) -> Bool {
+        if session.pid > 0 {
+            return parentMap[session.pid] != nil
+        }
+
+        return session.isSubagent
     }
 
     private func updateClaudeDetectors(with paths: [String]) -> [TokenDelta] {
@@ -399,7 +434,8 @@ class SessionManager {
         session.tokensPerMinute = 0
         session.inputTokensPerMinute = 0
         session.outputTokensPerMinute = 0
-        session.lastLogEventAt = now
+        // Don't set lastLogEventAt — unmatched sessions have no known log activity.
+        // Setting it to `now` would make dormant sessions appear active.
         return session
     }
 
@@ -874,5 +910,75 @@ class SessionManager {
             return Int.max
         }
         return abs(raw)
+    }
+
+    // MARK: - Session Tree Building
+
+    private func buildSessionTrees(allSessions: [AgentSession], parentMap: [Int: Int]) -> [SessionNode] {
+        // Index sessions by PID for fast lookup
+        var sessionByPid: [Int: AgentSession] = [:]
+        for session in allSessions {
+            if session.pid > 0 {
+                sessionByPid[session.pid] = session
+            }
+        }
+
+        // Build child lists: parentPid → [childSession]
+        var childrenOf: [Int: [AgentSession]] = [:]
+        var childPids: Set<Int> = []
+
+        for (childPid, parentPid) in parentMap {
+            // Only include if both parent and child are in our session list
+            guard let childSession = sessionByPid[childPid],
+                  sessionByPid[parentPid] != nil else { continue }
+            childrenOf[parentPid, default: []].append(childSession)
+            childPids.insert(childPid)
+        }
+
+        // Roots are sessions NOT in childPids
+        let roots = allSessions.filter { $0.pid > 0 ? !childPids.contains($0.pid) : true }
+
+        // Recursively build tree nodes
+        func buildNode(for session: AgentSession) -> SessionNode {
+            let children = (childrenOf[session.pid] ?? [])
+                .sorted(by: sessionSort)
+                .map { buildNode(for: $0) }
+            return SessionNode(session: session, children: children)
+        }
+
+        return roots
+            .sorted(by: sessionSort)
+            .map { buildNode(for: $0) }
+    }
+
+    private func sessionSort(_ lhs: AgentSession, _ rhs: AgentSession) -> Bool {
+        if lhs.didCrash != rhs.didCrash {
+            return lhs.didCrash && !rhs.didCrash
+        }
+
+        let lws = lhs.workspaceID ?? Int.max
+        let rws = rhs.workspaceID ?? Int.max
+        if lws != rws { return lws < rws }
+
+        let lname = (lhs.cwd as NSString).lastPathComponent
+        let rname = (rhs.cwd as NSString).lastPathComponent
+        if lname != rname { return lname.localizedStandardCompare(rname) == .orderedAscending }
+
+        if lhs.agentType != rhs.agentType {
+            return lhs.agentType.rawValue.localizedStandardCompare(rhs.agentType.rawValue) == .orderedAscending
+        }
+
+        return lhs.pid < rhs.pid
+    }
+
+    static func countDescendants(_ node: SessionNode) -> Int {
+        node.children.count + node.children.reduce(0) { $0 + countDescendants($1) }
+    }
+
+    static func isNodeBusy(_ node: SessionNode) -> Bool {
+        let s = node.session
+        if (s.inputTokensPerMinute + s.outputTokensPerMinute) > 0 { return true }
+        if s.turnState == .working { return true }
+        return node.children.contains { isNodeBusy($0) }
     }
 }
