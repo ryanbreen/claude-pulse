@@ -5,6 +5,7 @@ import SwiftUI
 class SessionManager {
     var sessions: [ClaudeSession] = []
     var sessionTrees: [SessionNode] = []
+    var activePids: Set<Int> = []
     var busyRootCount: Int = 0
     var totalAgentCount: Int = 0
     var activeCount: Int = 0
@@ -28,6 +29,7 @@ class SessionManager {
     private struct RefreshResult {
         let sessions: [AgentSession]
         let sessionTrees: [SessionNode]
+        let activePids: Set<Int>
         let busyRootCount: Int
         let totalAgentCount: Int
         let activeCount: Int
@@ -97,6 +99,7 @@ class SessionManager {
 
                 self.sessions = result.sessions
                 self.sessionTrees = result.sessionTrees
+                self.activePids = result.activePids
                 self.busyRootCount = result.busyRootCount
                 self.totalAgentCount = result.totalAgentCount
                 self.activeCount = result.activeCount
@@ -153,30 +156,37 @@ class SessionManager {
             s.workspaceID = locator.workspaceID(forPid: s.pid, cwd: s.cwd)
             return s
         }
+        let activity = markActiveDescendants(sessions: merged, parentMap: parentMap, now: now)
+        let activeMerged = merged.map { session -> AgentSession in
+            guard session.pid > 0,
+                  activity.activePids.contains(session.pid),
+                  !activity.selfActivePids.contains(session.pid)
+            else {
+                return session
+            }
 
-        let interactive = merged.filter { !isSessionSubagent($0, parentMap: parentMap) }
-        let subagents = merged.filter { isSessionSubagent($0, parentMap: parentMap) }
+            var busySession = session
+            busySession.turnState = .working
+            return busySession
+        }
+
+        let interactive = activeMerged.filter { !isSessionSubagent($0, parentMap: parentMap) }
+        let subagents = activeMerged.filter { isSessionSubagent($0, parentMap: parentMap) }
         let recencyCutoff: TimeInterval = 300  // 5 minutes
 
-        // "Active" = had real token traffic in the last 60s, OR turn state is working
-        // with recent log activity (catches orchestrator/factory sessions waiting on
-        // sub-agents with a pending tool_use but no token traffic of their own).
         let active = interactive.filter { session in
-            if (session.inputTokensPerMinute + session.outputTokensPerMinute) > 0 { return true }
-            if session.turnState == .working {
-                let lastActivity = max(session.lastLogEventAt, session.lastLogMtime)
-                return lastActivity > 0 && (now - lastActivity) < recencyCutoff
-            }
-            return false
+            isSessionActive(session, activePids: activity.activePids)
         }
-        // "Stalled" only counts if the log was recently touched. A session that hasn't moved
-        // in hours is dormant, not stalled — the user walked away.
         let stalled = interactive.filter { session in
             guard session.turnState == .stalled else { return false }
-            let lastActivity = max(session.lastLogEventAt, session.lastLogMtime)
-            return lastActivity > 0 && (now - lastActivity) < recencyCutoff
+            let lastActivity = session.lastLogEventAt
+            return lastActivity > 0
+                && (now - lastActivity) < recencyCutoff
+                && !isSessionActive(session, activePids: activity.activePids)
         }
-        let idle = interactive.filter { ($0.inputTokensPerMinute + $0.outputTokensPerMinute) == 0 && $0.turnState != .stalled }
+        let idle = interactive.filter { session in
+            !isSessionActive(session, activePids: activity.activePids) && session.turnState != .stalled
+        }
 
         let totalCpu = merged.reduce(0.0) { $0 + $1.cpuPercent }
         let totalMem = merged.reduce(0.0) { $0 + $1.rssMB }
@@ -208,12 +218,14 @@ class SessionManager {
         }
 
         // Build session trees from parentMap
-        let trees = buildSessionTrees(allSessions: merged, parentMap: parentMap)
-        let busyRoots = trees.filter { $0.session.agentType == .claude && Self.isNodeBusy($0) }.count
+        let trees = buildSessionTrees(allSessions: activeMerged, parentMap: parentMap)
+        let visibleRoots = trees.filter { Self.isNodeBusy($0, activePids: activity.activePids) }
+        let busyRoots = visibleRoots.filter { $0.session.agentType == .claude }.count
 
         return RefreshResult(
             sessions: sortedInteractive + sortedSubagents,
             sessionTrees: trees,
+            activePids: activity.activePids,
             busyRootCount: busyRoots,
             totalAgentCount: merged.count,
             activeCount: active.count,
@@ -224,9 +236,9 @@ class SessionManager {
             claudeCount: claudeSessions.count,
             codexCount: codexSessions.count,
             geminiCount: geminiSessions.count,
-            claudeActiveCount: claudeSessions.filter { $0.isWorking }.count,
-            codexActiveCount: codexSessions.filter { $0.isWorking }.count,
-            geminiActiveCount: geminiSessions.filter { $0.isWorking }.count,
+            claudeActiveCount: claudeSessions.filter { isSessionActive($0, activePids: activity.activePids) }.count,
+            codexActiveCount: codexSessions.filter { isSessionActive($0, activePids: activity.activePids) }.count,
+            geminiActiveCount: geminiSessions.filter { isSessionActive($0, activePids: activity.activePids) }.count,
             totalCpu: totalCpu,
             totalMemMB: totalMem,
             longestSession: longest,
@@ -242,6 +254,46 @@ class SessionManager {
         }
 
         return session.isSubagent
+    }
+
+    private func markActiveDescendants(
+        sessions: [AgentSession],
+        parentMap: [Int: Int],
+        now: TimeInterval
+    ) -> (selfActivePids: Set<Int>, activePids: Set<Int>) {
+        let selfActivePids = Set(
+            sessions.compactMap { session -> Int? in
+                guard session.pid > 0, isSelfActive(session, now: now) else { return nil }
+                return session.pid
+            }
+        )
+
+        var activePids = selfActivePids
+        for pid in selfActivePids {
+            var currentPid = parentMap[pid]
+            while let ancestorPid = currentPid {
+                activePids.insert(ancestorPid)
+                currentPid = parentMap[ancestorPid]
+            }
+        }
+
+        return (selfActivePids, activePids)
+    }
+
+    private func isSelfActive(_ session: AgentSession, now: TimeInterval) -> Bool {
+        if (session.inputTokensPerMinute + session.outputTokensPerMinute) > 0 {
+            return true
+        }
+
+        if session.lastLogEventAt > 0, (now - session.lastLogEventAt) < 300 {
+            return true
+        }
+
+        return session.cpuPercent > 10.0
+    }
+
+    private func isSessionActive(_ session: AgentSession, activePids: Set<Int>) -> Bool {
+        session.pid > 0 && activePids.contains(session.pid)
     }
 
     private func updateClaudeDetectors(with paths: [String]) -> [TokenDelta] {
@@ -317,8 +369,9 @@ class SessionManager {
         for snapshot in snapshots.sorted(by: { $0.lastModifiedAt > $1.lastModifiedAt }) {
             let matchedIndex = bestMatchIndex(for: snapshot, processes: remainingProcesses, now: now)
             let process = matchedIndex.map { remainingProcesses.remove(at: $0) }
+            let hasRecentTokenTraffic = tokenRateTracker.tokensPerMinute(for: snapshot.sessionKey, now: now) > 0
 
-            if process != nil || snapshot.shouldPublishWithoutProcess(now: now) {
+            if process != nil || snapshot.shouldPublishWithoutProcess(now: now, hasRecentTokenTraffic: hasRecentTokenTraffic) {
                 merged.append(makeSession(from: snapshot, process: process, now: now))
             }
         }
@@ -430,12 +483,12 @@ class SessionManager {
 
     private func processFallbackSession(_ process: AgentSession, now: TimeInterval) -> AgentSession {
         var session = process
-        session.turnState = process.cpuPercent > activeCpuThreshold ? .working : .unknown
+        // No log matched — require very high CPU (>20%) to assume working.
+        // A sleeping process can spike to 3-5% on a single ps sample.
+        session.turnState = process.cpuPercent > 20.0 ? .working : .unknown
         session.tokensPerMinute = 0
         session.inputTokensPerMinute = 0
         session.outputTokensPerMinute = 0
-        // Don't set lastLogEventAt — unmatched sessions have no known log activity.
-        // Setting it to `now` would make dormant sessions appear active.
         return session
     }
 
@@ -512,7 +565,8 @@ class SessionManager {
             return true
         }
 
-        if snapshot.shouldPublishWithoutProcess(now: now) {
+        let hasRecentTokenTraffic = tokenRateTracker.tokensPerMinute(for: snapshot.sessionKey, now: now) > 0
+        if snapshot.shouldPublishWithoutProcess(now: now, hasRecentTokenTraffic: hasRecentTokenTraffic) {
             return true
         }
 
@@ -975,10 +1029,7 @@ class SessionManager {
         node.children.count + node.children.reduce(0) { $0 + countDescendants($1) }
     }
 
-    static func isNodeBusy(_ node: SessionNode) -> Bool {
-        let s = node.session
-        if (s.inputTokensPerMinute + s.outputTokensPerMinute) > 0 { return true }
-        if s.turnState == .working { return true }
-        return node.children.contains { isNodeBusy($0) }
+    static func isNodeBusy(_ node: SessionNode, activePids: Set<Int>) -> Bool {
+        activePids.contains(node.session.pid)
     }
 }

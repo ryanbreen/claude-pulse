@@ -60,7 +60,7 @@ struct AgentSession: Identifiable, Sendable {
     var workspaceID: Int?
 
     var isWorking: Bool {
-        turnState == .working || (turnState == .unknown && cpuPercent > activeCpuThreshold)
+        turnState == .working
     }
 
     var isInteractive: Bool {
@@ -175,22 +175,31 @@ struct SessionLogSnapshot: Sendable {
         }
     }
 
-    func shouldPublishWithoutProcess(now: TimeInterval) -> Bool {
+    func shouldPublishWithoutProcess(now: TimeInterval, hasRecentTokenTraffic: Bool = false) -> Bool {
         if didCrash(isAlive: false) {
-            // Show crashed sessions for up to 5 minutes so the user can see the badge,
-            // but don't keep them forever — avoids permanently pinning false-positive crashes.
             let crashedDisplaySeconds: TimeInterval = 300
             return now - lastModifiedAt <= crashedDisplaySeconds
         }
-        return now - lastModifiedAt <= recentLogPublishGraceSeconds
+
+        return hasRecentTokenTraffic
+    }
+
+    /// The most recent conversation activity timestamp (excludes file-history-snapshot mtime).
+    private var lastConversationAt: TimeInterval {
+        max(lastHumanMessageAt, lastAssistantMessageAt, lastTurnCompleteAt,
+            lastToolUseAt, lastToolResultAt)
     }
 
     private func resolveClaudeTurnState(now: TimeInterval) -> TurnState {
-        if lastHumanMessageAt == 0 && lastTurnCompleteAt == 0 {
+        if lastHumanMessageAt == 0,
+           lastAssistantMessageAt == 0,
+           lastTurnCompleteAt == 0,
+           lastToolUseAt == 0,
+           lastToolResultAt == 0 {
             return .unknown
         }
 
-        if now - lastModifiedAt <= recentLogPublishGraceSeconds {
+        if now - lastConversationAt <= recentLogPublishGraceSeconds {
             return .working
         }
 
@@ -199,13 +208,20 @@ struct SessionLogSnapshot: Sendable {
         }
 
         if lastToolUseAt > lastToolResultAt && lastToolUseAt > lastTurnCompleteAt {
+            if now - lastToolUseAt < 90 {
+                return .working
+            }
+            return .stalled
+        }
+
+        if lastAssistantMessageAt <= lastHumanMessageAt {
+            if now - lastHumanMessageAt > 120 {
+                return .stalled
+            }
             return .working
         }
 
-        let nowMs = now * 1000
-
-        if lastAssistantMessageAt <= lastHumanMessageAt,
-           nowMs - lastHumanMessageAt > 120_000 {
+        if now - lastConversationAt > stalledAfterSeconds {
             return .stalled
         }
 

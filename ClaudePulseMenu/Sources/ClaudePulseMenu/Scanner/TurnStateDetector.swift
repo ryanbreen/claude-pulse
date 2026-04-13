@@ -52,12 +52,15 @@ struct TurnStateDetector: Sendable {
                 sessionId = lineSessionId
             }
 
+            guard let type = object["type"] as? String else { continue }
+
+            // Only count conversation entries for lastEventAt — file-history-snapshot
+            // entries can update file mtime without any actual conversation activity.
             let timestamp = Self.extractTimestamp(from: object)
-            if timestamp > lastEventAt {
+            if (type == "user" || type == "assistant" || type == "system"),
+               timestamp > lastEventAt {
                 lastEventAt = timestamp
             }
-
-            guard let type = object["type"] as? String else { continue }
 
             switch type {
             case "system":

@@ -6,7 +6,8 @@ struct StatsBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text("⚡ \(manager.activeCount) active")
+                Image(systemName: "brain.head.profile")
+                Text("\(manager.activeCount) active")
                     .foregroundStyle(.primary)
 
                 if manager.totalAgentCount > 0 {

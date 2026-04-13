@@ -13,36 +13,22 @@ struct MenuPopoverView: View {
         }
     }
 
-    /// Show any tree that has activity: token traffic, working state,
-    /// or recent log events. This catches factory workers launched in
-    /// separate terminal tabs that don't have a process-tree parent link.
     private var displayedTrees: [SessionNode] {
-        let now = Date().timeIntervalSince1970
-        let recentCutoff: TimeInterval = 300
         return manager.sessionTrees.filter { tree in
-            isTreeVisible(tree, now: now, cutoff: recentCutoff)
+            isTreeVisible(tree)
         }
     }
 
-    private func isTreeVisible(_ node: SessionNode, now: TimeInterval, cutoff: TimeInterval) -> Bool {
-        let s = node.session
-        // Has token traffic
-        if (s.inputTokensPerMinute + s.outputTokensPerMinute) > 0 { return true }
-        // Is working
-        if s.turnState == .working { return true }
-        // Is stalled with recent activity
-        if s.turnState == .stalled {
-            let lastActivity = max(s.lastLogEventAt, s.lastLogMtime)
-            if lastActivity > 0 && (now - lastActivity) < cutoff { return true }
-        }
-        // Any child is visible
-        return node.children.contains { isTreeVisible($0, now: now, cutoff: cutoff) }
+    private func isTreeVisible(_ node: SessionNode) -> Bool {
+        SessionManager.isNodeBusy(node, activePids: manager.activePids)
     }
 
     private var flatRows: [DisplayRow] {
         var result: [DisplayRow] = []
 
         func walk(_ node: SessionNode, depth: Int) {
+            guard isTreeVisible(node) else { return }
+
             result.append(
                 DisplayRow(
                     session: node.session,
@@ -50,7 +36,7 @@ struct MenuPopoverView: View {
                     childSummary: depth == 0 ? childSummary(for: node) : nil
                 )
             )
-            for child in node.children {
+            for child in node.children where isTreeVisible(child) {
                 walk(child, depth: depth + 1)
             }
         }
@@ -119,8 +105,8 @@ struct MenuPopoverView: View {
     private func childSummary(for node: SessionNode?) -> String? {
         guard let node, !node.children.isEmpty else { return nil }
 
-        let descendants = flattenedDescendants(of: node)
-        let activeDescendantCount = descendants.filter { SessionManager.isNodeBusy(SessionNode(session: $0, children: [])) }.count
+        let descendants = flattenedVisibleDescendants(of: node)
+        let activeDescendantCount = descendants.filter { $0.pid > 0 && manager.activePids.contains($0.pid) }.count
 
         var counts: [AgentType: Int] = [:]
         for session in descendants {
@@ -132,9 +118,10 @@ struct MenuPopoverView: View {
         return "\(descendants.count) sub, \(activeDescendantCount) active" + (mix.isEmpty ? "" : " • \(mix)")
     }
 
-    private func flattenedDescendants(of node: SessionNode) -> [AgentSession] {
+    private func flattenedVisibleDescendants(of node: SessionNode) -> [AgentSession] {
         node.children.flatMap { child in
-            [child.session] + flattenedDescendants(of: child)
+            guard isTreeVisible(child) else { return [AgentSession]() }
+            return [child.session] + flattenedVisibleDescendants(of: child)
         }
     }
 }
